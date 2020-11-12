@@ -1,0 +1,17 @@
+include(CMakeFindDependencyMacro)
+
+# bring config variables into scope like this:
+# set(my-config-var @my-config-var@)
+
+# find_dependency has the same syntax as find_package.
+# List all dependencies here so they are exposed to
+# the importing package through the vilibConfig.cmake
+
+# CUDA is not a dependency because it is natively
+# provided by cmake as language support?
+# Either way, there is no cudaConfig right now.
+
+# find_dependency(cuda REQUIRED)
+
+# Add the targets file
+include("${CMAKE_CURRENT_LIST_DIR}/vilibTargets.cmake")
