@@ -1,19 +1,29 @@
 # ----------------------------------------------------------------------
 # 2020 Bernd Pfrommer bernd.pfrommer@gmail.com
 #
-cmake_minimum_required(VERSION 3.9)
-project(vilib VERSION 1.0.0 DESCRIPTION "fast cuda fast feature tracking" LANGUAGES CXX CUDA)
+cmake_minimum_required(VERSION 3.10)
 
+if (${CMAKE_VERSION} VERSION_LESS 3.15)
+   project(vilib VERSION 1.0.0 DESCRIPTION "fast cuda fast feature tracking" LANGUAGES CXX)
+else()
+   project(vilib VERSION 1.0.0 DESCRIPTION "fast cuda fast feature tracking" LANGUAGES CXX CUDA)
+endif()
 include (CMakePrintHelpers)
 include (CMakePackageConfigHelpers)
 include (CPack)
-include (CheckLanguage)
 include (GNUInstallDirs)
+
+if (${CMAKE_VERSION} VERSION_LESS 3.15)
+   find_package(CUDA REQUIRED)
+   set(CUDA_LINK_LIBRARIES_KEYWORD PUBLIC)
+   cuda_select_nvcc_arch_flags(ARCH_FLAGS)
+   message(STATUS "Found CUDA ${CUDA_VERSION_STRING} at ${CUDA_TOOLKIT_ROOT_DIR}")
+endif()
+
 
 find_package(OpenCV REQUIRED COMPONENTS core)
 find_package(Eigen3 REQUIRED)
 
-check_language(CUDA)
 option(BUILD_SHARED_LIBS "build shared libraries" ON)
 cmake_print_variables(BUILD_SHARED_LIBS)
 
@@ -62,6 +72,7 @@ target_include_directories(vilib PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/visual_lib/include>  
     $<INSTALL_INTERFACE:include>
     ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+    ${CUDA_INCLUDE_DIRS}
     )
 
 # will require that the compiler support compiler standard, and
@@ -89,7 +100,12 @@ set(cxx_options -Wall -Wextra -Werror -Wfatal-errors -ffast-math -fsee -fno-sign
 set(nvcc_options --device-w --ftz=true --prec-div=false --prec-sqrt=false --fmad=true --default-stream per-thread -O3 -DNDEBUG)
 
 # the generator is only expanded if <COMPILE_LANGUAGE:FOO> evaluates to true
-target_compile_options(vilib PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${cxx_options}> $<$<COMPILE_LANGUAGE:CUDA>:${nvcc_options}>)
+
+if (${CMAKE_VERSION} VERSION_LESS 3.15)
+   target_compile_options(vilib PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${cxx_options}> $<$<NOT:$<COMPILE_LANGUAGE:CXX>>:${nvcc_options}>)
+else()
+   target_compile_options(vilib PRIVATE $<$<COMPILE_LANGUAGE:CXX>:${cxx_options}> $<$<COMPILE_LANGUAGE:CUDA>:${nvcc_options}>)
+endif()
 
 # Specify how to install the target.
 # The EXPORT keyword associates the installed target files with an "export" called
