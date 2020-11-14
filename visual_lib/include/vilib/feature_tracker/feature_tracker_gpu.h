@@ -95,7 +95,8 @@ private:
   void freeStorage(const::std::size_t & camera_id);
 
   void filterTracks(
-    size_t c, std::vector<std::size_t> *remove_indices,
+    size_t buffer_cam_idx, size_t track_cam_idx,
+    std::vector<std::size_t> *remove_indices,
     std::vector<bool> *mask);
 
   void detectNewFeatures(
