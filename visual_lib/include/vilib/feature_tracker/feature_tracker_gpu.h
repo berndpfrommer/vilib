@@ -37,11 +37,20 @@
 #include <vector>
 #include "vilib/feature_tracker/feature_tracker_base.h"
 #include "vilib/feature_detection/detector_base_gpu.h"
+#include <Eigen/Dense>
 
 namespace vilib {
 
+struct TrackedPoint {
+TrackedPoint(int id, float x, float y) : id_(id), x_(x), y_(y) {}
+  int id_;
+  float x_;
+  float y_;
+};
+
 class FeatureTrackerGPU : public FeatureTrackerBase {
 public:
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   FeatureTrackerGPU(const FeatureTrackerOptions & options,
                     const std::size_t & camera_num);
   ~FeatureTrackerGPU(void);
@@ -49,6 +58,10 @@ public:
   void track(const std::shared_ptr<FrameBundle> & cur_frames,
              std::size_t & total_tracked_features_num,
              std::size_t & total_detected_features_num) override;
+  void trackStereo(const std::shared_ptr<FrameBundle> & cur_frames,
+                   std::vector<std::vector<TrackedPoint>> *trackedPoints,
+                   std::size_t & total_tracked_features_num,
+                   std::size_t & total_detected_features_num);
   void setDetectorGPU(std::shared_ptr<DetectorBaseGPU> & detector,
                       const std::size_t & camera_id) override;
   void reset(void) override;
@@ -80,6 +93,20 @@ private:
   };
 
   void freeStorage(const::std::size_t & camera_id);
+
+  void filterTracks(
+    size_t c, std::vector<std::size_t> *remove_indices,
+    std::vector<bool> *mask);
+
+  void detectNewFeatures(
+    size_t c, std::vector<std::shared_ptr<Frame>> &cur_base_frames);
+
+  void addFeaturesToTracks(
+    size_t c,
+    std::vector<std::shared_ptr<Frame>> &cur_base_frames,
+    bool template_is_first_observation,
+    const std::vector<bool> &mask);
+
   int addTrack(std::shared_ptr<Frame> & first_frame,
                const float & first_x,
                const float & first_y,
@@ -95,6 +122,8 @@ private:
   void releaseBufferId(const std::size_t & id,
                        const std::size_t & camera_id);
 
+  void readCalibration();
+  Eigen::Matrix<double, 2, 3> affine_tf_;
   std::size_t pyramid_levels_;
   pyramid_patch_descriptor_t pyramid_patch_sizes_;
   std::vector<struct GPUBuffer> buffer_;

@@ -67,7 +67,8 @@ public:
   virtual void reset(void);
   void getDisparity(const double & pivot_ratio,
                     double & total_avg_disparity);
-protected:
+
+public:
   struct FeatureTrack {
     /*
      * Note to future self:
@@ -113,6 +114,11 @@ protected:
       {}
   };
 
+  const std::vector<std::vector<struct FeatureTrack>> &getTracks() const {
+    return (tracks_);
+  }
+
+protected:
   void removeTracks(const std::vector<std::size_t> & ind_to_remove,
                     const std::size_t & camera_id);
   void addFeature(const std::shared_ptr<Frame> & frame,

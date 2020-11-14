@@ -74,11 +74,335 @@ FeatureTrackerGPU::FeatureTrackerGPU(const FeatureTrackerOptions & options,
     }
   }
   pyramid_patch_sizes_.max_area = (max_patch_size+2)*(max_patch_size+2);
+  readCalibration();
 }
 
 FeatureTrackerGPU::~FeatureTrackerGPU(void) {
   for(std::size_t c=0;c<buffer_.size();++c) {
     freeStorage(c);
+  }
+}
+
+
+void FeatureTrackerGPU::readCalibration() {
+  Eigen::Matrix4d m;
+  m <<  0.99995273841,  0.00284628684,  0.00929621430, -0.20032164920,
+    -0.00285007802,  0.99999586067,  0.00039459796, -0.00109630102,
+    -0.00929505268, -0.00042107425,  0.99995671141,  0.00092501568,
+    0.00000000000,  0.00000000000,  0.00000000000,  1.00000000000;
+  Eigen::Isometry3d T_1_0;
+  Eigen::Matrix3d K0;
+  K0 <<
+    603.924, 0, 665.041,
+    0, 603.166,  554.34,
+    0, 0, 1.0;
+  Eigen::Matrix3d K1;
+  K1 <<
+    604.531, 0, 648.481,
+    0, 604.051,  440.254,
+    0, 0, 1.0;
+  T_1_0.matrix()  = m;
+  const double d = 5.0; // avg scene depth
+  const Eigen::Matrix3d R = m.block<3, 3>(0, 0);
+  Eigen::Matrix3d tmp = K1 * R * K0.inverse();
+  const auto t = (1.0 / d) * K1 * m.block<3,1>(0, 3);
+  tmp.block<2, 1>(0, 2) += t.block<2, 1>(0, 0);
+  affine_tf_ = tmp.block<2, 3>(0, 0);
+  std::cout << m << std::endl;
+  std::cout << affine_tf_ << std::endl;
+}
+
+void FeatureTrackerGPU::trackStereo(const std::shared_ptr<FrameBundle> & cur_frames,
+                                    std::vector<std::vector<vilib::TrackedPoint>> *trackedPoints,
+                                    std::size_t & total_tracked_features_num,
+                                    std::size_t & total_detected_features_num) {
+  assert(cur_frames->size() == detector_.size() &&
+         "The frame count and the detector count differs");
+  const size_t cam0_idx = 0;
+  const size_t cam1_idx = 1;
+#if VERBOSE_TRACKING
+  static std::size_t frame_bundle_id = 1;
+  std::cout << "Frame bundle " << (frame_bundle_id++) << " -------------" << std::endl;
+#endif /* VERBOSE_TRACKING */
+
+  std::vector<image_pyramid_descriptor_t> cur_pyramids;
+  std::vector<std::shared_ptr<Frame>> cur_base_frames;
+
+  // 00) Prerequisites
+  // The pyramid has already been formed when the frame was created,
+  // now just collect the pointers to the pyramid memory (descriptors) into
+  // cur_pyramids.
+  //
+  for(std::size_t c=0;c<cur_frames->size();++c) {
+    assert(detector_[c] != nullptr && "One must set a GPU feature detector first");
+    cur_base_frames.push_back(cur_frames->at(c));
+    cur_pyramids.push_back(cur_base_frames[c]->getPyramidDescriptor());
+    cur_base_frames[c]->resizeFeatureStorage(max_ftr_count_);
+  }
+  std::cout << "original tracks: " << tracks_[cam0_idx].size() << std::endl;
+  
+  // Track existing features in cam0 if there are any
+  if (tracks_[cam0_idx].size() > 0) {
+    for (std::size_t track_id = 0; track_id < tracks_[cam0_idx].size();
+         ++track_id) {
+      struct FeatureTrack & track = tracks_[cam0_idx][track_id];
+      // opposed to the previous version, now we only need to update
+      // the indirection layer that points to the already occupied buffer cells
+      buffer_[cam0_idx].h_indir_data_[track_id] = track.buffer_id_;
+    }
+    feature_tracker_cuda_tools::track_features(
+      options_.affine_est_offset,
+      options_.affine_est_gain,
+      tracks_[cam0_idx].size(),
+      options_.klt_min_level,
+      options_.klt_max_level,
+      options_.klt_min_update_squared,
+      cur_pyramids[cam0_idx],
+      pyramid_patch_sizes_,
+      buffer_[cam0_idx].d_indir_data_,
+      buffer_[cam0_idx].d_patch_data_,
+      buffer_[cam0_idx].d_hessian_data_,
+      buffer_[cam0_idx].d_first_px_,
+      buffer_[cam0_idx].d_cur_px_,
+      buffer_[cam0_idx].d_cur_alpha_beta_,
+      buffer_[cam0_idx].d_cur_f_,
+      buffer_[cam0_idx].d_cur_disparity_,
+      stream_[cam0_idx]);
+  }
+  // find bad points
+  std::vector<std::size_t> remove_indices;
+  std::vector<bool> mask;
+  filterTracks(cam0_idx, &remove_indices, &mask);
+  // add good one to tracks
+  addFeaturesToTracks(
+    cam0_idx, cur_base_frames,
+    true /* template_is_first_observation */, mask);
+  // cull bad tracks
+  removeTracks(remove_indices, cam0_idx);
+  std::cout << "after first filter: " << tracks_[cam0_idx].size() << std::endl;
+  // detect new features in cam0 frame
+  detectNewFeatures(cam0_idx, cur_base_frames);
+  // add newly detected features to tracks
+  updateTracks(detected_features_num_[cam0_idx], cur_pyramids[cam0_idx], cam0_idx);
+  std::cout << "after new features added: " << tracks_[cam0_idx].size() << std::endl;
+  trackedPoints->clear();
+  trackedPoints->push_back(std::vector<TrackedPoint>());
+  for (const auto &track: tracks_[cam0_idx]) {
+    (*trackedPoints).back().push_back(TrackedPoint(track.track_id_, track.cur_pos_[0],
+                                                   track.cur_pos_[1]));
+  }
+  // save the good points for output
+  trackedPoints->push_back(std::vector<TrackedPoint>());
+  for (const auto &track: tracks_[cam0_idx]) {
+    Eigen::Matrix<double, 3, 1> pt;
+    pt << track.cur_pos_[0], track.cur_pos_[1], 1.0;
+    auto uv = affine_tf_ * pt;
+    (*trackedPoints).back().push_back(TrackedPoint(track.track_id_, uv(0), uv(1)));
+  }
+
+  // now do LK from cam0 to cam1 frame
+  if (tracks_[cam0_idx].size() > 0) {
+    for (std::size_t track_id = 0; track_id < tracks_[cam0_idx].size();
+         ++track_id) {
+      struct FeatureTrack & track = tracks_[cam0_idx][track_id];
+      buffer_[cam0_idx].h_indir_data_[track_id] = track.buffer_id_;
+    }
+    feature_tracker_cuda_tools::track_features(
+      options_.affine_est_offset,
+      options_.affine_est_gain,
+      tracks_[cam0_idx].size(),
+      options_.klt_min_level,
+      options_.klt_max_level,
+      options_.klt_min_update_squared,
+      cur_pyramids[cam1_idx],
+      pyramid_patch_sizes_,
+      buffer_[cam0_idx].d_indir_data_,
+      buffer_[cam0_idx].d_patch_data_,
+      buffer_[cam0_idx].d_hessian_data_,
+      buffer_[cam0_idx].d_first_px_, // input
+      buffer_[cam0_idx].d_cur_px_, // input/output
+      buffer_[cam0_idx].d_cur_alpha_beta_, // input/output
+      buffer_[cam0_idx].d_cur_f_, // output (unused)
+      buffer_[cam0_idx].d_cur_disparity_, // output (scalar)
+      stream_[cam1_idx]);
+  }
+  // find points that do not track between left and right
+  filterTracks(cam0_idx, &remove_indices, &mask);
+  // save the good points for output
+  trackedPoints->push_back(std::vector<TrackedPoint>());
+    /*
+  for (size_t i = 0; i < tracks_[cam0_idx].size(); i++) {
+    struct FeatureTrack & track = tracks_[cam0_idx][i];
+    if (mask[i]) {
+        const std::size_t offset = track.buffer_id_*METADATA_ELEMENT_BYTES/4;
+        const float x = buffer_[cam0_idx].h_cur_px_[offset];
+        const float y = buffer_[cam0_idx].h_cur_px_[offset+1];
+        (*trackedPoints).back().push_back(TrackedPoint(track.track_id_, x, y));
+    }
+  }
+    */
+  // cull those tracks
+  removeTracks(remove_indices, cam0_idx);
+  std::cout << "after culling, final: " << tracks_[cam0_idx].size() << std::endl;
+
+  // Do the accumulation for statistics
+  total_tracked_features_num = std::accumulate(tracked_features_num_.begin(),
+                                               tracked_features_num_.end(),
+                                               0);
+  total_detected_features_num = std::accumulate(detected_features_num_.begin(),
+                                                detected_features_num_.end(),
+                                                0);
+}
+
+
+//
+// will add tracks, i.e. affect tracks_[camera_id]
+//
+
+void FeatureTrackerGPU::detectNewFeatures(
+  size_t c,
+  std::vector<std::shared_ptr<Frame>> &cur_base_frames) {
+  detected_features_num_[c] = 0;
+  if(tracked_features_num_[c] < options_.min_tracks_to_detect_new_features) {
+    OccupancyGrid2D & detector_grid = detector_[c]->getGrid();
+    detector_grid.reset();
+    // should we clear all tracks before detection?
+    if(options_.reset_before_detection) {
+      // yes, get rid of all tracked features
+      tracked_features_num_[c] = 0;
+      // free the buffers first
+      for(auto track : tracks_[c]) {
+        releaseBufferId(track.buffer_id_,c);
+      }
+      tracks_[c].clear();
+      // discard all previously added features from tracking
+      cur_base_frames[c]->num_features_ = 0;
+    } else {
+      // no, use the tracked features, and propagate the findings to the
+      // detector
+      for(std::size_t i=0;i<cur_base_frames[c]->num_features_;++i) {
+        const Eigen::Vector2d & pos_2d = cur_base_frames[c]->px_vec_.col(i);
+        detector_grid.setOccupied(pos_2d[0],pos_2d[1]);
+      }
+    }
+    /*
+     * Note to future self:
+     * pre-occupied cells will be isEmpty(cell_index) = false
+     */
+    detector_[c]->detect(
+      cur_base_frames[c].get()->pyramid_,
+      [&](const std::size_t & grid_cell_cnt,
+          const float * h_pos,
+          const float * h_score,
+          const int   * h_level)
+                       {
+                         // Do we use every detected feature?
+                         if(options_.use_best_n_features == -1) {
+                           // Yes, we are using every feature
+                           for(std::size_t cell_index=0;cell_index<detector_grid.size();++cell_index) {
+                             if(detector_grid.isEmpty(cell_index) && h_score[cell_index] > 0.0f) {
+                               // Add new feature track
+                               int track_index = addTrack(cur_base_frames[c],
+                                                          h_pos[cell_index*2],
+                                                          h_pos[cell_index*2+1],
+                                                          h_level[cell_index],
+                                                          h_score[cell_index],
+                                                          c);
+                               // Add tracked point to output
+                               addFeature(cur_base_frames[c],track_index,c);
+                               ++detected_features_num_[c];
+                             }
+                           }
+                         } else {
+                           // No, we are only using the best N features according to their score
+                           std::vector<std::size_t> idx(grid_cell_cnt);
+                           std::iota(idx.begin(), idx.end(), 0u);
+                           std::sort(idx.begin(), idx.end(), [&](std::size_t i1, std::size_t i2) {
+                                                               return h_score[i1] > h_score[i2];
+                                                             });
+                           std::size_t feature_limit = (std::size_t)std::max(0,options_.use_best_n_features - (int)tracked_features_num_[c]);
+                           for(std::size_t i=0;
+                               i<detector_grid.size() && detected_features_num_[c] < feature_limit;
+                               ++i) {
+                             std::size_t cell_index = idx[i];
+                             if(detector_grid.isEmpty(cell_index) && h_score[cell_index] > 0.0f) {
+                               // Add new feature track
+                               int track_index = addTrack(cur_base_frames[c],
+                                                          h_pos[cell_index*2],
+                                                          h_pos[cell_index*2+1],
+                                                          h_level[cell_index],
+                                                          h_score[cell_index],
+                                                          c);
+                               // Add tracked point to output
+                               addFeature(cur_base_frames[c],track_index,c);
+                               ++detected_features_num_[c];
+                             }
+                           }
+                         }
+                       });
+  }
+}
+
+void FeatureTrackerGPU::filterTracks(
+  size_t c, std::vector<std::size_t> *remove_indices,
+  std::vector<bool> *mask) {
+  mask->resize(tracks_[c].size(), true);
+  remove_indices->clear();
+  if(tracks_[c].size() > 0) {
+    // Just synchronize with the stream..
+    CUDA_API_CALL(cudaStreamSynchronize(stream_[c]));
+    // And check the results
+    for(std::size_t i=0; i<tracks_[c].size(); ++i) {
+      struct FeatureTrack & track = tracks_[c][i];
+      std::size_t offset = track.buffer_id_*METADATA_ELEMENT_BYTES/4;
+      // if out px_x is nan, then remove the track
+      float x = buffer_[c].h_cur_px_[offset];
+      if(std::isnan(x)) {
+        // we didnt converge in the KLT tracker
+        remove_indices->push_back(i);
+        releaseBufferId(track.buffer_id_,c);
+        (*mask)[i] = false;
+  #if FEATURE_TRACKER_ENABLE_ADDITIONAL_STATISTICS
+        life_stat_.add(track.life_);
+  #endif /* FEATURE_TRACKER_ENABLE_ADDITIONAL_STATISTICS */
+      }
+    }
+  }
+}
+
+void FeatureTrackerGPU::addFeaturesToTracks(
+  size_t c,
+  std::vector<std::shared_ptr<Frame>> &cur_base_frames,
+  bool template_is_first_observation,
+  const std::vector<bool> &mask) {
+
+  tracked_features_num_[c] = 0;
+  if(tracks_[c].size() > 0) {
+    CUDA_API_CALL(cudaStreamSynchronize(stream_[c]));
+    for(std::size_t i=0; i<tracks_[c].size(); ++i) {
+      struct FeatureTrack & track = tracks_[c][i];
+      if(mask[i]) {
+        ++track.life_;
+        // Last Position
+        const std::size_t offset = track.buffer_id_*METADATA_ELEMENT_BYTES/4;
+        const float x = buffer_[c].h_cur_px_[offset];
+        const float y = buffer_[c].h_cur_px_[offset+1];
+        track.cur_pos_[0] = x;
+        track.cur_pos_[1] = y;
+        // New disparity
+        track.cur_disparity_ = buffer_[c].h_cur_disparity_[offset];
+        // Update reference frame?
+        if(!template_is_first_observation) {
+          // store shared pointer, so the frame is not freed
+            track.template_frame_ = cur_base_frames[c];
+            // update GPU template position
+            buffer_[c].h_template_px_[offset] = x;
+            buffer_[c].h_template_px_[offset+1] = y;
+        }
+        ++tracked_features_num_[c];
+        addFeature(cur_base_frames[c],track);
+      }
+    }
   }
 }
 
@@ -126,55 +450,20 @@ void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
                                                  buffer_[c].d_patch_data_,
                                                  buffer_[c].d_hessian_data_,
                                                  buffer_[c].d_first_px_,
-                                                 buffer_[c].d_cur_px_,
-                                                 buffer_[c].d_cur_alpha_beta_,
-                                                 buffer_[c].d_cur_f_,
-                                                 buffer_[c].d_cur_disparity_,
+                                                 buffer_[c].d_cur_px_, // non-const
+                                                 buffer_[c].d_cur_alpha_beta_, // non-const
+                                                 buffer_[c].d_cur_f_, // non-const
+                                                 buffer_[c].d_cur_disparity_, // non-const
                                                  stream_[c]);
     }
   }
-
   // 02) Process Tracking results
   for(std::size_t c=0;c<cur_frames->size();++c) {
-    tracked_features_num_[c] = 0;
     std::vector<std::size_t> remove_indices;
-    if(tracks_[c].size() > 0) {
-      // Just synchronize with the stream..
-      CUDA_API_CALL(cudaStreamSynchronize(stream_[c]));
-      // And check the results
-      for(std::size_t i=0; i<tracks_[c].size(); ++i) {
-        struct FeatureTrack & track = tracks_[c][i];
-        std::size_t offset = track.buffer_id_*METADATA_ELEMENT_BYTES/4;
-        // if out px_x is nan, then remove the track, otherwise, update its current location
-        float x = buffer_[c].h_cur_px_[offset];
-        if(std::isnan(x)) {
-          // we didnt converge in the KLT tracker
-          remove_indices.push_back(i);
-          releaseBufferId(track.buffer_id_,c);
-  #if FEATURE_TRACKER_ENABLE_ADDITIONAL_STATISTICS
-          life_stat_.add(track.life_);
-  #endif /* FEATURE_TRACKER_ENABLE_ADDITIONAL_STATISTICS */
-        } else {
-          ++track.life_;
-          // Last Position
-          float y = buffer_[c].h_cur_px_[offset+1];
-          track.cur_pos_[0] = x;
-          track.cur_pos_[1] = y;
-          // New disparity
-          track.cur_disparity_ = buffer_[c].h_cur_disparity_[offset];
-          // Update reference frame?
-          if(options_.klt_template_is_first_observation == false) {
-            // store shared pointer, so the frame is not freed
-            track.template_frame_ = cur_base_frames[c];
-            // update GPU template position
-            buffer_[c].h_template_px_[offset] = x;
-            buffer_[c].h_template_px_[offset+1] = y;
-          }
-          ++tracked_features_num_[c];
-          addFeature(cur_base_frames[c],track);
-        }
-      }
-    }
+    std::vector<bool> mask;
+    filterTracks(c, &remove_indices, &mask);
+    addFeaturesToTracks(c, 
+      cur_base_frames, options_.klt_template_is_first_observation, mask);
 #if VERBOSE_TRACKING
     std::cout << " Tracked features (cam_id=" << c << "): " << tracked_features_num_[c] << std::endl;
 #endif /* VERBOSE_TRACKING */
@@ -182,89 +471,13 @@ void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
 #if VERBOSE_TRACKING
     std::cout << " Tracked features lost (cam_id=" << c << "): " << remove_indices.size() << std::endl;
 #endif /* VERBOSE_TRACKING */
-    removeTracks(remove_indices,c);
+    removeTracks(remove_indices, c);
   }
 
-  // 03) Detect new features (if necessary)
   for(std::size_t c=0;c<cur_frames->size();++c) {
-    detected_features_num_[c] = 0;
-    if(tracked_features_num_[c] < options_.min_tracks_to_detect_new_features) {
-      OccupancyGrid2D & detector_grid = detector_[c]->getGrid();
-      detector_grid.reset();
-      // should we clear all tracks before detection?
-      if(options_.reset_before_detection) {
-        // yes, get rid of all tracked features
-        tracked_features_num_[c] = 0;
-        // free the buffers first
-        for(auto track : tracks_[c]) {
-          releaseBufferId(track.buffer_id_,c);
-        }
-        tracks_[c].clear();
-        // discard all previously added features from tracking
-        cur_base_frames[c]->num_features_ = 0;
-      } else {
-        // no, use the tracked features, and propagate the findings to the
-        // detector
-        for(std::size_t i=0;i<cur_base_frames[c]->num_features_;++i) {
-          const Eigen::Vector2d & pos_2d = cur_base_frames[c]->px_vec_.col(i);
-          detector_grid.setOccupied(pos_2d[0],pos_2d[1]);
-        }
-      }
+    // 03) Detect new features (if necessary)
+    detectNewFeatures(c, cur_base_frames);
 
-      /*
-       * Note to future self:
-       * pre-occupied cells will be isEmpty(cell_index) = false
-       */
-      detector_[c]->detect(cur_base_frames[c].get()->pyramid_,
-                           [&](const std::size_t & grid_cell_cnt,
-                               const float * h_pos,
-                               const float * h_score,
-                               const int   * h_level) {
-          // Do we use every detected feature?
-          if(options_.use_best_n_features == -1) {
-            // Yes, we are using every feature
-            for(std::size_t cell_index=0;cell_index<detector_grid.size();++cell_index) {
-              if(detector_grid.isEmpty(cell_index) && h_score[cell_index] > 0.0f) {
-                // Add new feature track
-                int track_index = addTrack(cur_base_frames[c],
-                                           h_pos[cell_index*2],
-                                           h_pos[cell_index*2+1],
-                                           h_level[cell_index],
-                                           h_score[cell_index],
-                                           c);
-                // Add tracked point to output
-                addFeature(cur_base_frames[c],track_index,c);
-                ++detected_features_num_[c];
-              }
-            }
-          } else {
-            // No, we are only using the best N features according to their score
-            std::vector<std::size_t> idx(grid_cell_cnt);
-            std::iota(idx.begin(), idx.end(), 0u);
-            std::sort(idx.begin(), idx.end(), [&](std::size_t i1, std::size_t i2) {
-              return h_score[i1] > h_score[i2];
-            });
-            std::size_t feature_limit = (std::size_t)std::max(0,options_.use_best_n_features - (int)tracked_features_num_[c]);
-            for(std::size_t i=0;
-                i<detector_grid.size() && detected_features_num_[c] < feature_limit;
-                ++i) {
-              std::size_t cell_index = idx[i];
-              if(detector_grid.isEmpty(cell_index) && h_score[cell_index] > 0.0f) {
-                // Add new feature track
-                int track_index = addTrack(cur_base_frames[c],
-                                           h_pos[cell_index*2],
-                                           h_pos[cell_index*2+1],
-                                           h_level[cell_index],
-                                           h_score[cell_index],
-                                           c);
-                // Add tracked point to output
-                addFeature(cur_base_frames[c],track_index,c);
-                ++detected_features_num_[c];
-              }
-            }
-          }
-      });
-    }
 #if VERBOSE_TRACKING
     std::cout << " Detected features (cam_id=" << c << "): " << detected_features_num_[c] << std::endl;
 #endif /* VERBOSE_TRACKING */
