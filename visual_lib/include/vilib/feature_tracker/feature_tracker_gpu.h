@@ -95,20 +95,27 @@ private:
   void freeStorage(const::std::size_t & camera_id);
 
   void filterTracks(
-    size_t buffer_cam_idx, size_t track_cam_idx,
+    size_t cam_idx,
     std::vector<std::size_t> *remove_indices,
     std::vector<bool> *mask);
 
   void detectNewFeatures(
-    size_t c, std::vector<std::shared_ptr<Frame>> &cur_base_frames);
+    size_t c, const std::shared_ptr<Frame> &cur_base_frames);
 
   void addFeaturesToTracks(
     size_t c,
-    std::vector<std::shared_ptr<Frame>> &cur_base_frames,
+    const std::shared_ptr<Frame> &cur_base_frames,
     bool template_is_first_observation,
     const std::vector<bool> &mask);
 
-  int addTrack(std::shared_ptr<Frame> & first_frame,
+  void makeCurrentBaseFramesAndPyramids(
+    const std::shared_ptr<FrameBundle> & cur_frames,
+    std::vector<image_pyramid_descriptor_t> *cur_pyramids,
+    std::vector<std::shared_ptr<Frame>> *cur_base_frames) const;
+  void trackFeatures(size_t cam_idx,
+                     const image_pyramid_descriptor_t &cur_pyramid);
+
+  int addTrack(const std::shared_ptr<Frame> & first_frame,
                const float & first_x,
                const float & first_y,
                const int & first_level,
