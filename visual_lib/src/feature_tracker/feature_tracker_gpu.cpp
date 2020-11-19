@@ -135,10 +135,12 @@ void FeatureTrackerGPU::trackFeatures(size_t cam_idx,
     return;
   }
   // set up indirection data
+  //std::cout << "indirection data for " << cam_idx << std::endl;
   for (std::size_t track_id = 0; track_id < tracks_[cam_idx].size();
        ++track_id) {
     struct FeatureTrack & track = tracks_[cam_idx][track_id];
     buffer_[cam_idx].h_indir_data_[track_id] = track.buffer_id_;
+    //std::cout << "track: " << track_id << " has buffer_id " << track.buffer_id_ << std::endl;
   }
   feature_tracker_cuda_tools::track_features(
     options_.affine_est_offset,
@@ -187,9 +189,10 @@ void FeatureTrackerGPU::trackStereo(const std::shared_ptr<FrameBundle> & cur_fra
   std::vector<std::shared_ptr<Frame>> cur_base_frames;
 
   makeCurrentBaseFramesAndPyramids(cur_frames, &cur_pyramids, &cur_base_frames);
-  std::cout << "original tracks: " << tracks_[cam0_idx].size() << std::endl;
-
-  // will updated the cam0_idx buffer, but not the track info
+  const size_t num_orig_tracks = tracks_[cam0_idx].size();
+  trackedPoints->clear();
+  add_tracked_points(trackedPoints, tracks_[cam0_idx]);
+  // will update the cam0_idx buffer, but not the track info
   trackFeatures(cam0_idx, cur_pyramids[cam0_idx]);
   // find bad points
   std::vector<std::size_t> remove_indices;
@@ -200,89 +203,100 @@ void FeatureTrackerGPU::trackStereo(const std::shared_ptr<FrameBundle> & cur_fra
                       true /* template_is_first_observation */, mask);
   // cull bad tracks
   removeTracks(remove_indices, cam0_idx);
-  std::cout << "after first filter: " << tracks_[cam0_idx].size() << std::endl;
+  const size_t num_cam0_tracking = tracks_[cam0_idx].size();
   // detect new features in cam0 frame
   detectNewFeatures(cam0_idx, cur_base_frames[cam0_idx]);
-  // add newly detected features to tracks
-  updateTracks(detected_features_num_[cam0_idx], cur_pyramids[cam0_idx], cam0_idx);
-  std::cout << "after new features added: " << tracks_[cam0_idx].size() << std::endl;
-  trackedPoints->clear();
+  // add newly detected features to tracks. This will precompute
+  // the hessians and image patches as well
+  updateTracks(detected_features_num_[cam0_idx] +
+               (options_.klt_template_is_first_observation ?
+                0 : tracked_features_num_[cam0_idx]), cur_pyramids[cam0_idx], cam0_idx);
+  const size_t num_cam0_after_detection = tracks_[cam0_idx].size();
   add_tracked_points(trackedPoints, tracks_[cam0_idx]);
 
+  //
   // now do LK from cam0 to cam1 frame
-  if (tracks_[cam0_idx].size() > 0) {
-    for (std::size_t track_id = 0; track_id < tracks_[cam0_idx].size();
-         ++track_id) {
-      const FeatureTrack &track = tracks_[cam0_idx][track_id];
-      Eigen::Matrix<double, 3, 1> pt;
-      pt << track.cur_pos_[0], track.cur_pos_[1], 1.0;
-      const auto uv = affine_tf_ * pt;
-      const double x = uv(0);
-      const double y = uv(1);
-      buffer_[cam1_idx].h_indir_data_[track_id] = track.buffer_id_;
-      buffer_[cam1_idx].d_indir_data_[track_id] = track.buffer_id_;
-      // now set the init points
-      std::size_t offset = track.buffer_id_*METADATA_ELEMENT_BYTES/4;
-      // Update ref_px   = {first_x,first_y}
-      buffer_[cam1_idx].h_template_px_[offset] = buffer_[cam0_idx].h_template_px_[offset];
-      buffer_[cam1_idx].h_template_px_[offset+1] = buffer_[cam0_idx].h_template_px_[offset+1];
-      // Update first_px = {first_x,first_y}
-      buffer_[cam1_idx].h_first_px_[offset] = x;
-      buffer_[cam1_idx].h_first_px_[offset+1] = y;
-      // Update search_px = {first_x,first_y}
-      buffer_[cam1_idx].h_cur_px_[offset] = x;
-      buffer_[cam1_idx].h_cur_px_[offset+1] = y;
-      // Update alpha-beta = {0.0,0.0}
-      buffer_[cam1_idx].h_cur_alpha_beta_[offset] = 0.0f;
-      buffer_[cam1_idx].h_cur_alpha_beta_[offset+1] = 0.0f;
-    }
+  //
+
+  // clear the cam1 tracks
+  tracked_features_num_[cam1_idx] = 0;
+  for(auto track : tracks_[cam1_idx]) {
+    releaseBufferId(track.buffer_id_, cam1_idx);
+  }
+  tracks_[cam1_idx].clear();
+  cur_base_frames[cam1_idx]->num_features_ = 0;
+
+  trackedPoints->push_back(std::vector<TrackedPoint>());
+  // Transfer the tracks from cam1
+  for (std::size_t track_idx = 0; track_idx < tracks_[cam0_idx].size();
+       ++track_idx) {
+    const FeatureTrack &track0 = tracks_[cam0_idx][track_idx];
+    Eigen::Matrix<double, 3, 1> pt;
+    pt << track0.cur_pos_[0], track0.cur_pos_[1], 1.0;
+    const auto uv = affine_tf_ * pt;
+    const double x = uv(0);
+    const double y = uv(1);
+    // will also init from buffer:
+    // h_template_px_, h_first_px_, h_cur_px_, h_cur_alpha_beta_
+    addTrack(cur_base_frames[cam1_idx], x, y, track0.first_level_, track0.first_score_, cam1_idx);
+    const FeatureTrack &track1 = tracks_[cam1_idx].back();
+    std::size_t offset = track1.buffer_id_ * METADATA_ELEMENT_BYTES / 4;
+    // use the current location of cam0 features as patch location
+    // template_px_ will be used by the track initialization to
+    // extract the patches
+    buffer_[cam1_idx].h_template_px_[offset]   = track0.cur_pos_[0];
+    buffer_[cam1_idx].h_template_px_[offset+1] = track0.cur_pos_[1];
+    buffer_[cam1_idx].h_first_px_[offset]   = x;  // first point, needed for final distance-traveled calculation
+    buffer_[cam1_idx].h_first_px_[offset+1] = y;
+    buffer_[cam1_idx].h_cur_px_[offset]   = x;            // where to start looking
+    buffer_[cam1_idx].h_cur_px_[offset+1] = y;            // (updated by kernel)
+    buffer_[cam1_idx].h_cur_alpha_beta_[offset] = 0.0f;   // where to start with alpha/beta
+    buffer_[cam1_idx].h_cur_alpha_beta_[offset+1] = 0.0f;
+    (*trackedPoints).back().push_back(TrackedPoint(track1.track_id_, x, y));
+  }
+  // must have set the template_px_ data before calling updateTracks()
+  updateTracks(tracks_[cam1_idx].size(), cur_pyramids[cam0_idx], cam1_idx);
+
+  if (tracks_[cam1_idx].size() > 0) {
     feature_tracker_cuda_tools::track_features(
       options_.affine_est_offset,
       options_.affine_est_gain,
-      tracks_[cam0_idx].size(),
+      tracks_[cam1_idx].size(),
       options_.klt_min_level,
       options_.klt_max_level,
       options_.klt_min_update_squared,
       cur_pyramids[cam1_idx],
       pyramid_patch_sizes_,
       buffer_[cam1_idx].d_indir_data_,
-      buffer_[cam0_idx].d_patch_data_,  // keep patch and hessian data
-      buffer_[cam0_idx].d_hessian_data_,
-      buffer_[cam1_idx].d_first_px_, // input
+      buffer_[cam1_idx].d_patch_data_,  // keep patch and hessian data
+      buffer_[cam1_idx].d_hessian_data_,
+      buffer_[cam1_idx].d_first_px_, // input: starting point
       buffer_[cam1_idx].d_cur_px_, // input/output
       buffer_[cam1_idx].d_cur_alpha_beta_, // input/output
       buffer_[cam1_idx].d_cur_f_, // output (unused)
-      buffer_[cam1_idx].d_cur_disparity_, // output (scalar)
+      buffer_[cam1_idx].d_cur_disparity_, // output: distance moved from first_px
       stream_[cam1_idx]);
   }
   // find points that do not track between left and right
   filterTracks(cam1_idx, &remove_indices, &mask);
   // save the cam1 points for output
   trackedPoints->push_back(std::vector<TrackedPoint>());
-  for (size_t i = 0; i < tracks_[cam0_idx].size(); i++) {
-    const auto &track = tracks_[cam0_idx][i];
+  for (size_t i = 0; i < tracks_[cam1_idx].size(); i++) {
+    const auto &track = tracks_[cam1_idx][i];
     if (mask[i]) {
       const std::size_t offset = track.buffer_id_*METADATA_ELEMENT_BYTES/4;
       const float x = buffer_[cam1_idx].h_cur_px_[offset];
       const float y = buffer_[cam1_idx].h_cur_px_[offset+1];
       (*trackedPoints).back().push_back(TrackedPoint(track.track_id_, x, y));
     }
-    //(*trackedPoints).back().push_back(TrackedPoint(track.track_id_, uv(0), uv(1)));
   }
-    /*
-  for (size_t i = 0; i < tracks_[cam0_idx].size(); i++) {
-    struct FeatureTrack & track = tracks_[cam0_idx][i];
-    if (mask[i]) {
-        const std::size_t offset = track.buffer_id_*METADATA_ELEMENT_BYTES/4;
-        const float x = buffer_[cam0_idx].h_cur_px_[offset];
-        const float y = buffer_[cam0_idx].h_cur_px_[offset+1];
-        (*trackedPoints).back().push_back(TrackedPoint(track.track_id_, x, y));
-    }
-  }
-    */
   // cull those tracks
-  removeTracks(remove_indices, cam0_idx);
-  std::cout << "after culling, final: " << tracks_[cam0_idx].size() << std::endl;
+  removeTracks(remove_indices, cam1_idx);
+  const size_t num_cam1_after_cull = tracks_[cam1_idx].size();
+  std::cout << "track stats: " << num_orig_tracks << " -> "
+            << num_cam0_tracking << " -> "
+            << num_cam0_after_detection << " -> "
+            << num_cam1_after_cull << std::endl;
 
   // Do the accumulation for statistics
   total_tracked_features_num = std::accumulate(tracked_features_num_.begin(),
@@ -548,10 +562,12 @@ void FeatureTrackerGPU::updateTracks(const std::size_t & last_n,
     return;
   }
 
-  std::size_t offset = tracks_[camera_id].size() - last_n;
+  std::size_t track_offset = tracks_[camera_id].size() - last_n;
   // initialize the indirection layer with used buffer ids
   std::size_t indir_id = 0;
-  for(auto it=tracks_[camera_id].begin() + offset; it < tracks_[camera_id].end(); ++it) {
+  //std::cout << "updateTracks indirection data for " << camera_id << std::endl;
+  for(auto it=tracks_[camera_id].begin() + track_offset; it < tracks_[camera_id].end(); ++it) {
+    //std::cout << "track: " << indir_id << " has buffer_id " << it->buffer_id_ << std::endl;
     buffer_[camera_id].h_indir_data_[indir_id++] = it->buffer_id_;
   }
 
@@ -563,11 +579,20 @@ void FeatureTrackerGPU::updateTracks(const std::size_t & last_n,
                                             options_.klt_max_level,
                                             pyramid_description,
                                             pyramid_patch_sizes_,
-                                            buffer_[camera_id].d_indir_data_,
-                                            buffer_[camera_id].d_template_px_,
-                                            buffer_[camera_id].d_patch_data_,
-                                            buffer_[camera_id].d_hessian_data_,
+                                            buffer_[camera_id].d_indir_data_, // input (const)
+                                            buffer_[camera_id].d_template_px_, // input (const)
+                                            buffer_[camera_id].d_patch_data_, // output
+                                            buffer_[camera_id].d_hessian_data_, // output
                                             stream_[camera_id]);
+#if 0  
+  std::cout << "--- updated tracks for camid: " << camera_id << std::endl;
+  for(auto it=tracks_[camera_id].begin() + track_offset; it < tracks_[camera_id].end(); ++it) {
+    const auto &buf = buffer_[camera_id];
+    std::size_t offset = it->buffer_id_ * METADATA_ELEMENT_BYTES / 4;
+    std::cout << "template location: [" << it->track_id_ << "] bufid: " << it->buffer_id_ << ": " <<
+      buf.h_template_px_[offset] << ", " << buf.h_template_px_[offset + 1] << std::endl;
+  }
+#endif  
 }
 
 int FeatureTrackerGPU::addTrack(const std::shared_ptr<Frame> & first_frame,
