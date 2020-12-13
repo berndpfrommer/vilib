@@ -91,8 +91,8 @@ set_target_properties(vilib
   POSITION_INDEPENDENT_CODE ON
   )
 
-target_link_libraries(vilib PRIVATE
-  opencv_core Eigen3::Eigen)
+target_link_libraries(vilib PUBLIC
+  opencv_core Eigen3::Eigen ${CUDA_LIBRARIES})
 
 # Set different compiler options for cxx and nvcc
 
