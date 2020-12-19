@@ -34,6 +34,8 @@
 
 #include "vilib/feature_tracker/feature_tracker_base.h"
 
+#include <opencv2/calib3d.hpp>
+
 namespace vilib {
 
 FeatureTrackerBase::FeatureTrackerBase(const FeatureTrackerOptions & options,
@@ -46,6 +48,8 @@ FeatureTrackerBase::FeatureTrackerBase(const FeatureTrackerOptions & options,
   tracks_.resize(camera_num);
   tracked_features_num_.resize(camera_num,0);
   detected_features_num_.resize(camera_num,0);
+  dist_type_[0] = INVALID;
+  dist_type_[1] = INVALID;
 }
 
 FeatureTrackerBase::~FeatureTrackerBase(void) {
@@ -177,4 +181,71 @@ void FeatureTrackerBase::getDisparity(const double & pivot_ratio,
   total_avg_disparity /= tracks_.size();
 }
 
+void FeatureTrackerBase::setIntrinsics(
+  int camId, const Intrinsics &in) {
+  assert(camId >= 0 && camId < 2);
+  const auto intr = in.intrinsics;
+  k_matrix_[camId] = cv::Matx33d(intr[0], 0, intr[2],
+                                 0, intr[1], intr[3],
+                                 0,       0,       1);
+  dist_type_[camId] =
+    (in.dist_type == "equidistant" || in.dist_type == "fisheye") ? EQUIDIST : RADTAN;
+  dist_coeff_[camId] = in.dist_coeffs;
+  resolution_[camId] = in.resolution;
+  if (dist_type_[0] != INVALID && dist_type_[1] != INVALID &&
+      extrinsics_valid_) {
+    calibration_valid_ = true;
+  }
+}
+
+void FeatureTrackerBase::setExtrinsics(const Eigen::Isometry3d &T) {
+  rect_matrix_ = cv::Matx33d(T(0, 0), T(0, 1), T(0, 2),
+                             T(1, 0), T(1, 1), T(1, 2),
+                             T(2, 0), T(2, 1), T(2, 2));
+  extrinsics_valid_ = true;
+  if (dist_type_[0] != INVALID && dist_type_[1] != INVALID &&
+      extrinsics_valid_) {
+    calibration_valid_ = true;
+  }
+}
+
+void FeatureTrackerBase::transformPointsToCam1(
+  const std::vector<FeatureTrack> &tracks,
+  std::vector<cv::Point2f> *cam1_points) {
+  // fetch cam0 points
+  std::vector<cv::Point2f> cam0Points(tracks.size());
+  for (size_t i = 0; i < tracks.size(); i++) {
+    const auto &track = tracks[i];
+    cam0Points[i].x = track.cur_pos_[0];
+    cam0Points[i].y = track.cur_pos_[1];
+  }
+  // undistort cam0 points and use rotation only to tranform
+  // to cam1. This is correct only for points infinitely far away
+  std::vector<cv::Point2f> cam1UndistPoints; // temp array
+  switch (dist_type_[0]) {
+  case EQUIDIST:
+    cv::fisheye::undistortPoints(cam0Points, cam1UndistPoints,
+                                 k_matrix_[0], dist_coeff_[0],
+                                 rect_matrix_);
+    break;
+  case RADTAN:
+  default:
+    cv::undistortPoints(cam0Points, cam1UndistPoints,
+                        k_matrix_[0], dist_coeff_[0],
+                        rect_matrix_);
+  }
+  // distort points to cam1
+  switch (dist_type_[1]) {
+  case EQUIDIST:
+    cv::fisheye::distortPoints(cam1UndistPoints, *cam1_points, k_matrix_[1], dist_coeff_[1]);
+    break;
+  default:
+  case RADTAN: {
+    std::vector<cv::Point3f> cam1UndistPointsH;
+    cv::convertPointsToHomogeneous(cam1UndistPoints, cam1UndistPointsH);
+    cv::projectPoints(cam1UndistPointsH, cv::Vec3d::zeros(), cv::Vec3d::zeros(),
+                      k_matrix_[1], dist_coeff_[1], *cam1_points);
+    break; }
+  }
+}
 } // namespace vilib

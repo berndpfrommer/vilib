@@ -21,7 +21,7 @@ if (${CMAKE_VERSION} VERSION_LESS 3.15)
 endif()
 
 
-find_package(OpenCV REQUIRED COMPONENTS core)
+find_package(OpenCV REQUIRED COMPONENTS core calib3d)
 find_package(Eigen3 REQUIRED)
 
 option(BUILD_SHARED_LIBS "build shared libraries" ON)

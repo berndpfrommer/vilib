@@ -130,8 +130,6 @@ private:
   void releaseBufferId(const std::size_t & id,
                        const std::size_t & camera_id);
 
-  void readCalibration();
-  Eigen::Matrix<double, 2, 3> affine_tf_;
   std::size_t pyramid_levels_;
   pyramid_patch_descriptor_t pyramid_patch_sizes_;
   std::vector<struct GPUBuffer> buffer_;

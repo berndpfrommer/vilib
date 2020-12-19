@@ -35,6 +35,7 @@
 #pragma once
 
 #include <memory>
+#include <string>
 #include <vector>
 #include "vilib/feature_tracker/feature_tracker_options.h"
 #include "vilib/common/frame.h"
@@ -48,6 +49,22 @@ namespace vilib {
 
 class FeatureTrackerBase {
 public:
+  struct Intrinsics {
+  Intrinsics(const std::vector<uint32_t> &r = std::vector<uint32_t>(),
+             const std::vector<double> &in = std::vector<double>(),
+             const std::vector<double> &dc = std::vector<double>(),
+             const std::string &dt = std::string()) :
+    resolution(r),
+      intrinsics(in),
+      dist_coeffs(dc),
+      dist_type(dt)
+      {
+      }
+    std::vector<uint32_t> resolution;
+    std::vector<double> intrinsics;
+    std::vector<double> dist_coeffs;
+    std::string dist_type;
+  };
   FeatureTrackerBase(const FeatureTrackerOptions & options,
                      const std::size_t & camera_num);
   virtual ~FeatureTrackerBase(void);
@@ -67,6 +84,9 @@ public:
   virtual void reset(void);
   void getDisparity(const double & pivot_ratio,
                     double & total_avg_disparity);
+  void setIntrinsics(int camId, const Intrinsics &intr);
+  void setExtrinsics(const Eigen::Isometry3d &T_1_0);
+
 
 public:
   struct FeatureTrack {
@@ -119,6 +139,8 @@ public:
   }
 
 protected:
+  typedef enum {INVALID, EQUIDIST, RADTAN} DistortionType;
+
   void removeTracks(const std::vector<std::size_t> & ind_to_remove,
                     const std::size_t & camera_id);
   void addFeature(const std::shared_ptr<Frame> & frame,
@@ -126,11 +148,20 @@ protected:
   void addFeature(const std::shared_ptr<Frame> & frame,
                   const int & track_id,
                   const std::size_t & camera_id);
+  void transformPointsToCam1(const std::vector<FeatureTrack> &tracks,
+                             std::vector<cv::Point2f> *cam1_points);
 
   FeatureTrackerOptions options_;
   std::vector<std::vector<struct FeatureTrack>> tracks_;
   std::vector<std::size_t> tracked_features_num_;
   std::vector<std::size_t> detected_features_num_;
+  DistortionType dist_type_[2];
+  bool calibration_valid_{false};
+  bool extrinsics_valid_{false};
+  cv::Matx33d k_matrix_[2];
+  std::vector<double> dist_coeff_[2];
+  std::vector<uint32_t> resolution_[2];
+  cv::Matx33d rect_matrix_;
 #if FEATURE_TRACKER_ENABLE_ADDITIONAL_STATISTICS
   Statistics life_stat_;
 #endif /* FEATURE_TRACKER_ENABLE_ADDITIONAL_STATISTICS */

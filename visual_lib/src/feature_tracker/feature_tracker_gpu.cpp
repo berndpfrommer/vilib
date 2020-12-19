@@ -74,42 +74,12 @@ FeatureTrackerGPU::FeatureTrackerGPU(const FeatureTrackerOptions & options,
     }
   }
   pyramid_patch_sizes_.max_area = (max_patch_size+2)*(max_patch_size+2);
-  readCalibration();
 }
 
 FeatureTrackerGPU::~FeatureTrackerGPU(void) {
   for(std::size_t c=0;c<buffer_.size();++c) {
     freeStorage(c);
   }
-}
-
-
-void FeatureTrackerGPU::readCalibration() {
-  Eigen::Matrix4d m;
-  m <<  0.99995273841,  0.00284628684,  0.00929621430, -0.20032164920,
-    -0.00285007802,  0.99999586067,  0.00039459796, -0.00109630102,
-    -0.00929505268, -0.00042107425,  0.99995671141,  0.00092501568,
-    0.00000000000,  0.00000000000,  0.00000000000,  1.00000000000;
-  Eigen::Isometry3d T_1_0;
-  Eigen::Matrix3d K0;
-  K0 <<
-    603.924, 0, 665.041,
-    0, 603.166,  554.34,
-    0, 0, 1.0;
-  Eigen::Matrix3d K1;
-  K1 <<
-    604.531, 0, 648.481,
-    0, 604.051,  440.254,
-    0, 0, 1.0;
-  T_1_0.matrix()  = m;
-  const double d = 5.0; // avg scene depth
-  const Eigen::Matrix3d R = m.block<3, 3>(0, 0);
-  Eigen::Matrix3d tmp = K1 * R * K0.inverse();
-  const auto t = (1.0 / d) * K1 * m.block<3,1>(0, 3);
-  tmp.block<2, 1>(0, 2) += t.block<2, 1>(0, 0);
-  affine_tf_ = tmp.block<2, 3>(0, 0);
-  std::cout << m << std::endl;
-  std::cout << affine_tf_ << std::endl;
 }
 
 void FeatureTrackerGPU::makeCurrentBaseFramesAndPyramids(
@@ -176,6 +146,10 @@ void FeatureTrackerGPU::trackStereo(const std::shared_ptr<FrameBundle> & cur_fra
                                     std::vector<std::vector<vilib::TrackedPoint>> *trackedPoints,
                                     std::size_t & total_tracked_features_num,
                                     std::size_t & total_detected_features_num) {
+  if (!calibration_valid_) {
+    trackedPoints->clear();
+    return;
+  }
   assert(cur_frames->size() == detector_.size() &&
          "The frame count and the detector count differs");
   const size_t cam0_idx = 0;
@@ -227,15 +201,16 @@ void FeatureTrackerGPU::trackStereo(const std::shared_ptr<FrameBundle> & cur_fra
   cur_base_frames[cam1_idx]->num_features_ = 0;
 
   trackedPoints->push_back(std::vector<TrackedPoint>());
+
+  std::vector<cv::Point2f> cam1_points;
+  transformPointsToCam1(tracks_[cam0_idx], &cam1_points);
+
   // Transfer the tracks from cam1
   for (std::size_t track_idx = 0; track_idx < tracks_[cam0_idx].size();
        ++track_idx) {
     const FeatureTrack &track0 = tracks_[cam0_idx][track_idx];
-    Eigen::Matrix<double, 3, 1> pt;
-    pt << track0.cur_pos_[0], track0.cur_pos_[1], 1.0;
-    const auto uv = affine_tf_ * pt;
-    const double x = uv(0);
-    const double y = uv(1);
+    const double x = cam1_points[track_idx].x;
+    const double y = cam1_points[track_idx].y;
     // will also init from buffer:
     // h_template_px_, h_first_px_, h_cur_px_, h_cur_alpha_beta_
     addTrack(cur_base_frames[cam1_idx], x, y, track0.first_level_, track0.first_score_, cam1_idx);
@@ -801,5 +776,4 @@ void FeatureTrackerGPU::reset(void) {
   // clear the parent member variables
   FeatureTrackerBase::reset();
 }
-
 } // namespace vilib
