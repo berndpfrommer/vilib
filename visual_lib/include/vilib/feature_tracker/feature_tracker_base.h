@@ -37,6 +37,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <opencv2/core/affine.hpp>
 #include "vilib/feature_tracker/feature_tracker_options.h"
 #include "vilib/common/frame.h"
 #include "vilib/common/framebundle.h"
@@ -162,6 +163,7 @@ protected:
   std::vector<double> dist_coeff_[2];
   std::vector<uint32_t> resolution_[2];
   cv::Matx33d rect_matrix_;
+  cv::Affine3d T_affine_;
 #if FEATURE_TRACKER_ENABLE_ADDITIONAL_STATISTICS
   Statistics life_stat_;
 #endif /* FEATURE_TRACKER_ENABLE_ADDITIONAL_STATISTICS */

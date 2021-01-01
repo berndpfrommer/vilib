@@ -202,6 +202,8 @@ void FeatureTrackerBase::setExtrinsics(const Eigen::Isometry3d &T) {
   rect_matrix_ = cv::Matx33d(T(0, 0), T(0, 1), T(0, 2),
                              T(1, 0), T(1, 1), T(1, 2),
                              T(2, 0), T(2, 1), T(2, 2));
+  //T_affine_ = cv::Affine3d(rect_matrix_, cv::Vec3f(T(0, 3), T(1, 3) , T(2, 3)));
+  T_affine_ = cv::Affine3d(rect_matrix_, cv::Vec3f(0, 0, 0));
   extrinsics_valid_ = true;
   if (dist_type_[0] != INVALID && dist_type_[1] != INVALID &&
       extrinsics_valid_) {
@@ -212,6 +214,10 @@ void FeatureTrackerBase::setExtrinsics(const Eigen::Isometry3d &T) {
 void FeatureTrackerBase::transformPointsToCam1(
   const std::vector<FeatureTrack> &tracks,
   std::vector<cv::Point2f> *cam1_points) {
+  if (tracks.empty()) {
+    cam1_points->clear();
+    return;
+  }
   // fetch cam0 points
   std::vector<cv::Point2f> cam0Points(tracks.size());
   for (size_t i = 0; i < tracks.size(); i++) {
@@ -223,11 +229,10 @@ void FeatureTrackerBase::transformPointsToCam1(
   // to cam1. This is correct only for points infinitely far away
   std::vector<cv::Point2f> cam1UndistPoints; // temp array
   switch (dist_type_[0]) {
-  case EQUIDIST:
+  case EQUIDIST: {
     cv::fisheye::undistortPoints(cam0Points, cam1UndistPoints,
-                                 k_matrix_[0], dist_coeff_[0],
-                                 rect_matrix_);
-    break;
+                                 k_matrix_[0], dist_coeff_[0]);
+    break; }
   case RADTAN:
   default:
     cv::undistortPoints(cam0Points, cam1UndistPoints,
@@ -236,9 +241,12 @@ void FeatureTrackerBase::transformPointsToCam1(
   }
   // distort points to cam1
   switch (dist_type_[1]) {
-  case EQUIDIST:
-    cv::fisheye::distortPoints(cam1UndistPoints, *cam1_points, k_matrix_[1], dist_coeff_[1]);
-    break;
+  case EQUIDIST: {
+    std::vector<cv::Point3f> cam1UndistPointsH;
+    cv::convertPointsToHomogeneous(cam1UndistPoints, cam1UndistPointsH);
+    cv::fisheye::projectPoints(cam1UndistPointsH, *cam1_points, T_affine_,
+                               k_matrix_[1], dist_coeff_[1]);
+    break; }
   default:
   case RADTAN: {
     std::vector<cv::Point3f> cam1UndistPointsH;

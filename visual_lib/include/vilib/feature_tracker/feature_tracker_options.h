@@ -85,6 +85,9 @@ struct FeatureTrackerOptions {
   ///       that do not contain a tracked feature yet
   int use_best_n_features = -1;
 
+  /// Discard any features that have a score less than this
+  float min_score = 0;
+
   /// Use the first observation as klt template. If set to false, then the
   /// last observation is used, which results in more feature drift.
   /// Note: if the klt template is the first observation, the reference patch

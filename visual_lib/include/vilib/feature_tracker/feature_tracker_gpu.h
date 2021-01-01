@@ -42,10 +42,13 @@
 namespace vilib {
 
 struct TrackedPoint {
-TrackedPoint(int id, float x, float y) : id_(id), x_(x), y_(y) {}
+TrackedPoint(int id, float x, float y, int level, float score) :
+  id_(id), x_(x), y_(y), level_(level), score_(score) {}
   int id_;
   float x_;
   float y_;
+  int level_;
+  float score_;
 };
 
 class FeatureTrackerGPU : public FeatureTrackerBase {

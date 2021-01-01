@@ -52,7 +52,8 @@ void update_tracks(const int candidate_num,
                    float * d_hessian_data,
                    cudaStream_t stream);
 
-void track_features(const bool affine_est_offset,
+void track_features(const bool always_converge,
+                    const bool affine_est_offset,
                     const bool affine_est_gain,
                     const int candidate_num,
                     const int min_level,

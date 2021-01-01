@@ -55,7 +55,8 @@ namespace feature_tracker_cuda_tools {
 #define CANDIDATES_PER_BLOCK_TRACK      2
 
 template <typename T, const bool affine_est_offset, const bool affine_est_gain>
-__device__ __inline__ void perform_lk(const float & min_update_squared,
+__device__ __inline__ void perform_lk(const bool always_converge,
+                                      const float & min_update_squared,
                                       const int & img_width,
                                       const int & img_height,
                                       const int & img_pitch,
@@ -184,10 +185,14 @@ __device__ __inline__ void perform_lk(const float & min_update_squared,
       break;
     }
   }
+  if (always_converge) {
+    converged = true;
+  }
 }
 
 template <typename T, const bool affine_est_offset, const bool affine_est_gain>
-__global__ void track_features_kernel(const int candidate_num,
+__global__ void track_features_kernel(const bool always_converge,
+                                      const int candidate_num,
                                       const int min_level,
                                       const int max_level,
                                       const float min_update_squared,
@@ -260,6 +265,7 @@ __global__ void track_features_kernel(const int candidate_num,
       const unsigned char * d_in_cur_img = pyramid_description.data[level];
       // do the Lukas-Kanade on the actual level, using the reference patch
       perform_lk<T, affine_est_offset, affine_est_gain>(
+        always_converge,
                                  min_update_squared,
                                  d_in_img_width,
                                  d_in_img_height,
@@ -281,29 +287,30 @@ __global__ void track_features_kernel(const int candidate_num,
         // Point location
         d_cur_px_bx.x = cur_px.x;
         d_cur_px_bx.y = cur_px.y;
-        // Alpha-beta estimation
-        if(affine_est_gain) {
-          d_cur_alpha_beta_bx.x = cur_alpha_beta.x;
-        }
-        if(affine_est_offset) {
-          d_cur_alpha_beta_bx.y = cur_alpha_beta.y;
-        }
-        // Bearing vector
-        // TODO
-        (void)d_cur_f_bx;
-        // Disparity
-        d_cur_disparity_bx = sqrtf((cur_px.x - d_first_px_bx.x)*(cur_px.x - d_first_px_bx.x) +
-                                   (cur_px.y - d_first_px_bx.y)*(cur_px.y - d_first_px_bx.y));
       } else {
         // Initialize output to be NAN
         d_cur_px_bx.x = __int_as_float(0x7fffffff);
         d_cur_px_bx.y = __int_as_float(0x7fffffff);
       }
+      // Alpha-beta estimation
+      if(affine_est_gain) {
+        d_cur_alpha_beta_bx.x = cur_alpha_beta.x;
+      }
+      if(affine_est_offset) {
+        d_cur_alpha_beta_bx.y = cur_alpha_beta.y;
+      }
+      // Bearing vector
+      // TODO
+      (void)d_cur_f_bx;
+      // Disparity
+      d_cur_disparity_bx = sqrtf((cur_px.x - d_first_px_bx.x)*(cur_px.x - d_first_px_bx.x) +
+                                 (cur_px.y - d_first_px_bx.y)*(cur_px.y - d_first_px_bx.y));
     }
   }
 }
 
-__host__ void track_features(const bool affine_est_offset,
+__host__ void track_features(const bool always_converge,
+                             const bool affine_est_offset,
                              const bool affine_est_gain,
                              const int candidate_num,
                              const int min_level,
@@ -330,6 +337,7 @@ __host__ void track_features(const bool affine_est_offset,
   // Launch kernel
   if(affine_est_offset && affine_est_gain) {
     track_features_kernel<FEATURE_TRACKER_REFERENCE_PATCH_TYPE,true,true><<<blocks_per_grid,threads_per_block,shm_per_block,stream>>>(
+      always_converge,
       candidate_num,
       min_level,
       max_level,
@@ -347,6 +355,7 @@ __host__ void track_features(const bool affine_est_offset,
     );
   } else if(affine_est_offset) {
     track_features_kernel<FEATURE_TRACKER_REFERENCE_PATCH_TYPE,true,false><<<blocks_per_grid,threads_per_block,shm_per_block,stream>>>(
+      always_converge,
       candidate_num,
       min_level,
       max_level,
@@ -364,6 +373,7 @@ __host__ void track_features(const bool affine_est_offset,
     );
   } else if(affine_est_gain) {
     track_features_kernel<FEATURE_TRACKER_REFERENCE_PATCH_TYPE,false,true><<<blocks_per_grid,threads_per_block,shm_per_block,stream>>>(
+      always_converge,
       candidate_num,
       min_level,
       max_level,
@@ -381,6 +391,7 @@ __host__ void track_features(const bool affine_est_offset,
     );
   } else {
     track_features_kernel<FEATURE_TRACKER_REFERENCE_PATCH_TYPE,false,false><<<blocks_per_grid,threads_per_block,shm_per_block,stream>>>(
+      always_converge,
       candidate_num,
       min_level,
       max_level,
