@@ -138,53 +138,9 @@ void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
 
   // 02) Process Tracking results
   for(std::size_t c=0;c<cur_frames->size();++c) {
-    tracked_features_num_[c] = 0;
-    std::vector<std::size_t> remove_indices;
-    if(tracks_[c].size() > 0) {
-      // Just synchronize with the stream..
-      CUDA_API_CALL(cudaStreamSynchronize(stream_[c]));
-      // And check the results
-      for(std::size_t i=0; i<tracks_[c].size(); ++i) {
-        struct FeatureTrack & track = tracks_[c][i];
-        std::size_t offset = track.buffer_id_*METADATA_ELEMENT_BYTES/4;
-        // if out px_x is nan, then remove the track, otherwise, update its current location
-        float x = buffer_[c].h_cur_px_[offset];
-        if(std::isnan(x)) {
-          // we didnt converge in the KLT tracker
-          remove_indices.push_back(i);
-          releaseBufferId(track.buffer_id_,c);
-  #if FEATURE_TRACKER_ENABLE_ADDITIONAL_STATISTICS
-          life_stat_.add(track.life_);
-  #endif /* FEATURE_TRACKER_ENABLE_ADDITIONAL_STATISTICS */
-        } else {
-          ++track.life_;
-          // Last Position
-          float y = buffer_[c].h_cur_px_[offset+1];
-          track.cur_pos_[0] = x;
-          track.cur_pos_[1] = y;
-          // New disparity
-          track.cur_disparity_ = buffer_[c].h_cur_disparity_[offset];
-          // Update reference frame?
-          if(options_.klt_template_is_first_observation == false) {
-            // store shared pointer, so the frame is not freed
-            track.template_frame_ = cur_base_frames[c];
-            // update GPU template position
-            buffer_[c].h_template_px_[offset] = x;
-            buffer_[c].h_template_px_[offset+1] = y;
-          }
-          ++tracked_features_num_[c];
-          addFeature(cur_base_frames[c],track);
-        }
-      }
-    }
-#if VERBOSE_TRACKING
-    std::cout << " Tracked features (cam_id=" << c << "): " << tracked_features_num_[c] << std::endl;
-#endif /* VERBOSE_TRACKING */
-  // 02) Remove terminated tracks
-#if VERBOSE_TRACKING
-    std::cout << " Tracked features lost (cam_id=" << c << "): " << remove_indices.size() << std::endl;
-#endif /* VERBOSE_TRACKING */
-    removeTracks(remove_indices,c);
+    processTrackingResults(cur_base_frames[c], &tracks_[c],
+                           &tracked_features_num_[c],
+                           &buffer_[c], &stream_[c]);
   }
 
   // 03) Detect new features (if necessary)
@@ -236,6 +192,63 @@ void FeatureTrackerGPU::computePyramidInfo(
 }
 
 
+void FeatureTrackerGPU::processTrackingResults(
+  const std::shared_ptr<Frame> &base_frame,
+  std::vector<FeatureTrack> *tracks,
+  size_t *tracked_features_num,
+  struct GPUBuffer *buffer_ptr,
+  cudaStream_t *stream_ptr)
+{
+  auto &buffer = *buffer_ptr;
+  *tracked_features_num = 0;
+  std::vector<std::size_t> remove_indices;
+  if(tracks->size() > 0) {
+    // Just synchronize with the stream..
+    CUDA_API_CALL(cudaStreamSynchronize(*stream_ptr));
+    // And check the results
+    for(std::size_t i=0; i<tracks->size(); ++i) {
+      struct FeatureTrack & track = (*tracks)[i];
+      std::size_t offset = track.buffer_id_*METADATA_ELEMENT_BYTES/4;
+      // if out px_x is nan, then remove the track, otherwise, update its current location
+      float x = buffer.h_cur_px_[offset];
+      if(std::isnan(x)) {
+        // we didnt converge in the KLT tracker
+        remove_indices.push_back(i);
+        releaseBufferId(buffer_ptr, track.buffer_id_);
+#if FEATURE_TRACKER_ENABLE_ADDITIONAL_STATISTICS
+        life_stat_.add(track.life_);
+#endif /* FEATURE_TRACKER_ENABLE_ADDITIONAL_STATISTICS */
+      } else {
+        ++track.life_;
+        // Last Position
+        float y = buffer.h_cur_px_[offset+1];
+        track.cur_pos_[0] = x;
+        track.cur_pos_[1] = y;
+        // New disparity
+        track.cur_disparity_ = buffer.h_cur_disparity_[offset];
+        // Update reference frame?
+        if(options_.klt_template_is_first_observation == false) {
+          // store shared pointer, so the frame is not freed
+          track.template_frame_ = base_frame;
+          // update GPU template position
+          buffer.h_template_px_[offset] = x;
+          buffer.h_template_px_[offset+1] = y;
+        }
+        ++(*tracked_features_num);
+        addFeature(base_frame, track);
+      }
+    }
+  }
+#if VERBOSE_TRACKING
+  std::cout << " Tracked features (cam_id=" << c << "): " << *tracked_features_num << std::endl;
+#endif /* VERBOSE_TRACKING */
+  // Remove terminated tracks
+#if VERBOSE_TRACKING
+  std::cout << " Tracked features lost (cam_id=" << c << "): " << remove_indices.size() << std::endl;
+#endif /* VERBOSE_TRACKING */
+  removeTracks(remove_indices, tracks);
+}
+                                       
 void  FeatureTrackerGPU::trackOnGPU(
   const image_pyramid_descriptor_t & pyramid_description,
   const pyramid_patch_descriptor_t & pyramid_patch_sizes,
@@ -298,7 +311,7 @@ void FeatureTrackerGPU::addFeaturesToTracks(
     addFeature(base_frames[c], track_index, c);
     ++detected_features_num_[c];
   }
-  // 04) Precompute patches & Hessians
+  // 04) Precomopute patches & Hessians
   if(options_.klt_template_is_first_observation) {
     // only precompute the newly detected features
     updateTracks(detected_features_num_[c], pyramids[c], c);
@@ -588,7 +601,7 @@ std::size_t FeatureTrackerGPU::acquireBufferId(const std::size_t & camera_id) {
 
 void FeatureTrackerGPU::releaseBufferId(const std::size_t & id,
                                         const std::size_t & camera_id) {
-  buffer_[camera_id].available_indices_.push_back(id);
+  releaseBufferId(&buffer_[camera_id], id);
 }
 
 void FeatureTrackerGPU::reset(void) {

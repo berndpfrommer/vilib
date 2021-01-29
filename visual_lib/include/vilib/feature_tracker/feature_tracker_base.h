@@ -113,6 +113,9 @@ protected:
 
   void removeTracks(const std::vector<std::size_t> & ind_to_remove,
                     const std::size_t & camera_id);
+  void removeTracks(const std::vector<std::size_t> & ind_to_remove,
+                    std::vector<struct FeatureTrack> *tracks);
+
   void addFeature(const std::shared_ptr<Frame> & frame,
                   const struct FeatureTrack & track);
   void addFeature(const std::shared_ptr<Frame> & frame,

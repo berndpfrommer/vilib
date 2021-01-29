@@ -99,6 +99,13 @@ private:
                   struct GPUBuffer *buffer_ptr,
                   cudaStream_t *stream_ptr);
 
+  void processTrackingResults(
+    const std::shared_ptr<Frame> &base_frame,
+    std::vector<FeatureTrack> *tracks,
+    size_t *tracked_features_num,
+    struct GPUBuffer *buffer_ptr,
+    cudaStream_t *stream_ptr);
+
   void addFeaturesToTracks(
     const std::vector<std::shared_ptr<Frame>> &base_frames,
     const std::vector<image_pyramid_descriptor_t> &pyramids,
@@ -121,6 +128,10 @@ private:
   // Buffer management (indirection layer)
   void initBufferIds(const std::size_t & camera_id);
   std::size_t acquireBufferId(const std::size_t & camera_id);
+  inline void releaseBufferId(GPUBuffer *buffer,
+                              const std::size_t & id) {
+    buffer->available_indices_.push_back(id);
+  }
   void releaseBufferId(const std::size_t & id,
                        const std::size_t & camera_id);
 

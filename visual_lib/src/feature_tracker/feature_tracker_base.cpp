@@ -68,12 +68,17 @@ void FeatureTrackerBase::setMinTracksToDetect(int n) {
 
 void FeatureTrackerBase::removeTracks(const std::vector<std::size_t> & ind_to_remove,
                                       const std::size_t & camera_id) {
+  removeTracks(ind_to_remove, &tracks_[camera_id]);
+}
+
+void FeatureTrackerBase::removeTracks(const std::vector<std::size_t> & ind_to_remove,
+                                      std::vector<struct FeatureTrack> *tracks) {
   /*
    * Note to future self:
    * the original idea came from SVO: container_helpers.h
    * and it was extended with std::move()
    */
-  std::vector<struct FeatureTrack> & source = tracks_[camera_id];
+  std::vector<struct FeatureTrack> & source = *tracks;
   std::vector<struct FeatureTrack> dest;
   std::size_t start_offset;
   std::size_t end_offset;
@@ -87,6 +92,7 @@ void FeatureTrackerBase::removeTracks(const std::vector<std::size_t> & ind_to_re
   std::move(source.begin() + start_offset,source.end(),std::back_inserter(dest));
   source.swap(dest);
 }
+
 
 void FeatureTrackerBase::addFeature(const std::shared_ptr<Frame> & frame,
                                     const struct FeatureTrack & track) {
