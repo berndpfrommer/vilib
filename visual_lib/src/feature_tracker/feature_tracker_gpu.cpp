@@ -82,31 +82,33 @@ FeatureTrackerGPU::~FeatureTrackerGPU(void) {
   }
 }
 
+#if 0
 void FeatureTrackerGPU::trackFeatures(
   PyramidInfo *prev_pyr,
   PyramidInfo *cur_pyr,
   const std::vector<std::vector<Feature>> &prev_features,
-  std::vector<std::vector<Feature>> *cur_features) {
-  assert(prev_pyr.base_frames.size() ==
-         cur_pyr.base_frames.size() &&
-         prev_pyr.pyramid_descs.size() ==
-         cur_pyr.pyramid_descs.size() &&
-         prev_pyr.base_frames.size() ==
-         detector_.size() &&
-         "frame count mismatch");
+  std::vector<std::vector<Feature>> *cur_features,
+  size_t cam_id) {
+  assert(prev_pyr.base_frames.size() >= cam_id &&
+         cur_pyr.base_frames.size() >= cam_id &&
+         prev_pyr.pyramid_descs.size() >= cam_id &&
+         cur_pyr.pyramid_descs.size() >= cam_id &&
+         detector_.size() >= cam_id &&
+         "cam_id out of range");
   // clear all tracks before detection
   std::vector<std::shared_ptr<Frame>> cur_base_frames;
 
   // remove all features from frame and release track
   // memory
-  for(std::size_t c=0;c<cur_pyr->base_frames.size();++c) {
-    clearTracksAndFeatures(&prev_pyr->base_frames, c);
+  clearTracksAndFeatures(&prev_pyr->base_frames, cam_id);
     addFeaturesToTracks(cur_pyr->base_frames, cur_pyr->pyramid_descs,
                         prev_features, c);
   }
   (void) cur_features;
 
 }
+#endif
+
 
 void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
                               std::size_t & total_tracked_features_num,
@@ -128,35 +130,10 @@ void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
   std::vector<image_pyramid_descriptor_t> &cur_pyramids = pyInfo.pyramid_descs;
   std::vector<std::shared_ptr<Frame>> &cur_base_frames = pyInfo.base_frames;
 
-  // 01) Track existing feature tracks (only if there is any)
+  // 01) Track existing feature tracks (only if there are any)
   for(std::size_t c=0;c<cur_frames->size();++c) {
-    if(tracks_[c].size() > 0) {
-      for(std::size_t track_id=0; track_id<tracks_[c].size(); ++track_id) {
-        struct FeatureTrack & track = tracks_[c][track_id];
-        // opposed to the previous version, now we only need to update
-        // the indirection layer that points to the already occupied buffer cells
-        buffer_[c].h_indir_data_[track_id] = track.buffer_id_;
-      }
-
-      // run the tracking on the GPU
-      feature_tracker_cuda_tools::track_features(options_.affine_est_offset,
-                                                 options_.affine_est_gain,
-                                                 tracks_[c].size(),
-                                                 options_.klt_min_level,
-                                                 options_.klt_max_level,
-                                                 options_.klt_min_update_squared,
-                                                 cur_pyramids[c],
-                                                 pyramid_patch_sizes_,
-                                                 buffer_[c].d_indir_data_,
-                                                 buffer_[c].d_patch_data_,
-                                                 buffer_[c].d_hessian_data_,
-                                                 buffer_[c].d_first_px_,
-                                                 buffer_[c].d_cur_px_,
-                                                 buffer_[c].d_cur_alpha_beta_,
-                                                 buffer_[c].d_cur_f_,
-                                                 buffer_[c].d_cur_disparity_,
-                                                 stream_[c]);
-    }
+    trackOnGPU(cur_pyramids[c], pyramid_patch_sizes_, tracks_[c],
+               &buffer_[c], &stream_[c]);
   }
 
   // 02) Process Tracking results
@@ -259,6 +236,40 @@ void FeatureTrackerGPU::computePyramidInfo(
 }
 
 
+void  FeatureTrackerGPU::trackOnGPU(
+  const image_pyramid_descriptor_t & pyramid_description,
+  const pyramid_patch_descriptor_t & pyramid_patch_sizes,
+  const std::vector<FeatureTrack> &tracks,
+  struct GPUBuffer *buffer_ptr,
+  cudaStream_t *stream_ptr) {
+  auto &buffer = *buffer_ptr;
+  if(tracks.size() > 0) {
+    for(std::size_t track_id=0; track_id<tracks.size(); ++track_id) {
+      // opposed to the previous version, now we only need to update
+      // the indirection layer that points to the already occupied buffer cells
+      buffer.h_indir_data_[track_id] = tracks[track_id].buffer_id_;
+    }
+    // run the tracking on the GPU
+    feature_tracker_cuda_tools::track_features(options_.affine_est_offset,
+                                               options_.affine_est_gain,
+                                               tracks.size(),
+                                               options_.klt_min_level,
+                                               options_.klt_max_level,
+                                               options_.klt_min_update_squared,
+                                               pyramid_description,
+                                               pyramid_patch_sizes,
+                                               buffer.d_indir_data_,
+                                               buffer.d_patch_data_,
+                                               buffer.d_hessian_data_,
+                                               buffer.d_first_px_,
+                                               buffer.d_cur_px_,
+                                               buffer.d_cur_alpha_beta_,
+                                               buffer.d_cur_f_,
+                                               buffer.d_cur_disparity_,
+                                               *stream_ptr);
+  }
+}
+
 void FeatureTrackerGPU::clearTracksAndFeatures(
   std::vector<std::shared_ptr<Frame>> *base_frames,
   size_t c) {
@@ -271,6 +282,7 @@ void FeatureTrackerGPU::clearTracksAndFeatures(
   // discard all previously added features from tracking
   (*base_frames)[c]->num_features_ = 0;
 }
+
 
 void FeatureTrackerGPU::addFeaturesToTracks(
   const std::vector<std::shared_ptr<Frame>> &base_frames,
