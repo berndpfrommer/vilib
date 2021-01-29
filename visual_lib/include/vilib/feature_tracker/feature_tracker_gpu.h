@@ -55,6 +55,7 @@ public:
   void reset(void) override;
   void addFeaturesToTracks(
     const std::vector<std::shared_ptr<Frame>> &base_frames,
+    const std::vector<image_pyramid_descriptor_t> &pyramids,
     const std::vector<std::vector<Feature>> &features, size_t c);
 
 private:
@@ -85,6 +86,10 @@ private:
   };
 
   void freeStorage(const::std::size_t & camera_id);
+  void detectNewFeatures(std::vector<std::vector<Feature>> *features,
+                         const std::vector<std::shared_ptr<Frame>> &base_frames,
+                         size_t max_new_features,
+                         size_t c);
   int addTrack(const std::shared_ptr<Frame> & first_frame,
                const float & first_x,
                const float & first_y,

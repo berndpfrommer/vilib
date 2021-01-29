@@ -200,72 +200,17 @@ void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
         // discard all previously added features from tracking
         cur_base_frames[c]->num_features_ = 0;
       }
-      OccupancyGrid2D & detector_grid = detector_[c]->getGrid();
-      detector_grid.reset();
-      // mark used grid cells as occupied so the detector does
-      // not find new features there
-      for(std::size_t i=0;i<cur_base_frames[c]->num_features_;++i) {
-        const Eigen::Vector2d & pos_2d = cur_base_frames[c]->px_vec_.col(i);
-        detector_grid.setOccupied(pos_2d[0],pos_2d[1]);
-      }
-
-      /*
-       * Note to future self:
-       * pre-occupied cells will be isEmpty(cell_index) = false
-       */
-      features_found[c].reserve(detector_grid.size());
-      detector_[c]->detect(cur_base_frames[c].get()->pyramid_,
-                           [&](const std::size_t & grid_cell_cnt,
-                               const float * h_pos,
-                               const float * h_score,
-                               const int   * h_level) {
-          // Do we use every detected feature?
-          if(options_.use_best_n_features == -1) {
-            // Yes, we are using every feature
-            for(std::size_t cell_index=0;cell_index<detector_grid.size();++cell_index) {
-              if(detector_grid.isEmpty(cell_index) && h_score[cell_index] > 0.0f) {
-                features_found[c].push_back(Feature(h_pos[cell_index * 2],
-                                                    h_pos[cell_index * 2 + 1],
-                                                    h_level[cell_index],
-                                                    h_score[cell_index]));
-              }
-            }
-          } else {
-            // No, we are only using the best N features according to their score
-            std::vector<std::size_t> idx(grid_cell_cnt);
-            std::iota(idx.begin(), idx.end(), 0u);
-            std::sort(idx.begin(), idx.end(), [&](std::size_t i1, std::size_t i2) {
-              return h_score[i1] > h_score[i2];
-            });
-            std::size_t feature_limit = (std::size_t)std::max(0,options_.use_best_n_features - (int)tracked_features_num_[c]);
-            for(std::size_t i=0;
-                i<detector_grid.size() && features_found[c].size() < feature_limit;
-                ++i) {
-              std::size_t cell_index = idx[i];
-              if(detector_grid.isEmpty(cell_index) && h_score[cell_index] > 0.0f) {
-                features_found[c].push_back(Feature(h_pos[cell_index * 2],
-                                                    h_pos[cell_index * 2 + 1],
-                                                    h_level[cell_index],
-                                                    h_score[cell_index]));
-              }
-            }
-          }
-      });
+      const size_t max_new_features = (size_t)std::max(
+        0, options_.use_best_n_features - (int)tracked_features_num_[c]);
+      detectNewFeatures(&features_found, cur_base_frames,
+                        max_new_features, c);
     }
     // add new features to tracks
-    addFeaturesToTracks(cur_base_frames, features_found, c);
+    addFeaturesToTracks(cur_base_frames, cur_pyramids, features_found, c);
 #if VERBOSE_TRACKING
     std::cout << " Detected features (cam_id=" << c << "): " << detected_features_num_[c] << std::endl;
 #endif /* VERBOSE_TRACKING */
 
-    // 04) Precompute patches & Hessians
-    if(options_.klt_template_is_first_observation) {
-      // only precompute the newly detected features
-      updateTracks(detected_features_num_[c],cur_pyramids[c],c);
-    } else {
-      // precompute all current feature tracks
-      updateTracks((detected_features_num_[c] + tracked_features_num_[c]),cur_pyramids[c],c);
-    }
   }
   // 04) Do the accumulation for statistics
   total_tracked_features_num = std::accumulate(tracked_features_num_.begin(),
@@ -278,7 +223,9 @@ void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
 
 void FeatureTrackerGPU::addFeaturesToTracks(
   const std::vector<std::shared_ptr<Frame>> &base_frames,
-  const std::vector<std::vector<Feature>> &features, size_t c) {
+  const std::vector<image_pyramid_descriptor_t> &pyramids,
+  const std::vector<std::vector<Feature>> &features,
+  size_t c) {
   // add new features to track
   detected_features_num_[c] = 0;
   for (const auto f: features[c]) {
@@ -288,6 +235,72 @@ void FeatureTrackerGPU::addFeaturesToTracks(
     addFeature(base_frames[c], track_index, c);
     ++detected_features_num_[c];
   }
+  // 04) Precompute patches & Hessians
+  if(options_.klt_template_is_first_observation) {
+    // only precompute the newly detected features
+    updateTracks(detected_features_num_[c], pyramids[c], c);
+  } else {
+    // precompute all current feature tracks
+    updateTracks(detected_features_num_[c] + tracked_features_num_[c], pyramids[c],c);
+  }
+}
+
+void FeatureTrackerGPU::detectNewFeatures(
+  std::vector<std::vector<Feature>> *features,
+  const std::vector<std::shared_ptr<Frame>> &base_frames,
+  size_t max_new_features,
+  size_t c) {
+  OccupancyGrid2D & detector_grid = detector_[c]->getGrid();
+  detector_grid.reset();
+  // mark used grid cells as occupied so the detector does
+  // not find new features there
+  for(std::size_t i=0;i<base_frames[c]->num_features_;++i) {
+    const Eigen::Vector2d & pos_2d = base_frames[c]->px_vec_.col(i);
+    detector_grid.setOccupied(pos_2d[0],pos_2d[1]);
+  }
+  /*
+   * Note to future self:
+   * pre-occupied cells will be isEmpty(cell_index) = false
+   */
+  (*features)[c].reserve(detector_grid.size());
+  detector_[c]->detect(
+    base_frames[c].get()->pyramid_,
+    [&](const std::size_t & grid_cell_cnt,
+        const float * h_pos,
+        const float * h_score,
+        const int   * h_level) {
+          // Do we use every detected feature?
+          if(options_.use_best_n_features == -1) {
+            // Yes, we are using every feature
+            for(std::size_t cell_index=0;cell_index<detector_grid.size();++cell_index) {
+              if(detector_grid.isEmpty(cell_index) && h_score[cell_index] > 0.0f) {
+                (*features)[c].push_back(Feature(h_pos[cell_index * 2],
+                                                 h_pos[cell_index * 2 + 1],
+                                                 h_level[cell_index],
+                                                 h_score[cell_index]));
+              }
+            }
+          } else {
+            // No, we are only using the best N features according to their score
+            std::vector<std::size_t> idx(grid_cell_cnt);
+            std::iota(idx.begin(), idx.end(), 0u);
+            std::sort(idx.begin(), idx.end(), [&](std::size_t i1, std::size_t i2) {
+              return h_score[i1] > h_score[i2];
+            });
+            for(std::size_t i=0;
+                i<detector_grid.size() && (*features)[c].size() < max_new_features;
+                ++i) {
+              std::size_t cell_index = idx[i];
+              if(detector_grid.isEmpty(cell_index) && h_score[cell_index] > 0.0f) {
+                (*features)[c].push_back(Feature(h_pos[cell_index * 2],
+                                                 h_pos[cell_index * 2 + 1],
+                                                 h_level[cell_index],
+                                                 h_score[cell_index]));
+              }
+            }
+          }
+    });
+
 }
 
 void FeatureTrackerGPU::updateTracks(const std::size_t & last_n,
