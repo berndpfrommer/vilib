@@ -91,8 +91,11 @@ private:
   };
 
   void freeStorage(const::std::size_t & camera_id);
-  void clearTracksAndFeatures(std::vector<std::shared_ptr<Frame>> *base_frames,
-                              size_t c);
+  void clearTracksAndFeatures(
+    const std::shared_ptr<Frame> &base_frame,
+    GPUBuffer *buffer_ptr,
+    std::vector<FeatureTrack> *tracks, size_t *tracked_features_num);
+
   void trackOnGPU(const image_pyramid_descriptor_t & pyramid_description,
                   const pyramid_patch_descriptor_t & pyramid_patch_sizes,
                   const std::vector<FeatureTrack> &tracks,
@@ -107,27 +110,35 @@ private:
     cudaStream_t *stream_ptr);
 
   void addFeaturesToTracks(
-    const std::vector<std::shared_ptr<Frame>> &base_frames,
-    const std::vector<image_pyramid_descriptor_t> &pyramids,
-    const std::vector<std::vector<Feature>> &features,
-    size_t c);
+    const std::shared_ptr<Frame> &base_frame,
+    const image_pyramid_descriptor_t &pyramids,
+    const std::vector<Feature> &features,
+    size_t tracked_features_num,
+    GPUBuffer *buffer,
+    size_t *detected_features_num,
+    std::vector<FeatureTrack> *tracks,
+    cudaStream_t *stream_ptr);
 
-  void detectNewFeatures(std::vector<std::vector<Feature>> *features,
-                         const std::vector<std::shared_ptr<Frame>> &base_frames,
+  void detectNewFeatures(std::vector<Feature> *features,
+                         const Frame &base_frame,
                          size_t max_new_features,
-                         size_t c);
-  int addTrack(const std::shared_ptr<Frame> & first_frame,
+                         const std::shared_ptr<DetectorBaseGPU> &detector);
+
+  int addTrack(GPUBuffer *buffer_ptr,
+               std::vector<FeatureTrack> *tracks,
+               const std::shared_ptr<Frame> & first_frame,
                const float & first_x,
                const float & first_y,
                const int & first_level,
-               const float & first_score,
-               const std::size_t & camera_id);
+               const float & first_score);
   void updateTracks(const std::size_t & last_n,
                     const image_pyramid_descriptor_t & pyramid_description,
-                    const std::size_t & camera_id);
+                    GPUBuffer *buffer,
+                    std::vector<FeatureTrack> *tracks,
+                    cudaStream_t *stream_ptr);
   // Buffer management (indirection layer)
   void initBufferIds(const std::size_t & camera_id);
-  std::size_t acquireBufferId(const std::size_t & camera_id);
+  std::size_t acquireBufferId(GPUBuffer *buffer);
   inline void releaseBufferId(GPUBuffer *buffer,
                               const std::size_t & id) {
     buffer->available_indices_.push_back(id);
