@@ -38,6 +38,7 @@
 #include "vilib/feature_tracker/feature_tracker_base.h"
 #include "vilib/feature_detection/detector_base_gpu.h"
 #include "vilib/common/feature.h"
+#include "vilib/common/pyramid_info.h"
 
 namespace vilib {
 
@@ -53,10 +54,12 @@ public:
   void setDetectorGPU(std::shared_ptr<DetectorBaseGPU> & detector,
                       const std::size_t & camera_id) override;
   void reset(void) override;
-  void addFeaturesToTracks(
-    const std::vector<std::shared_ptr<Frame>> &base_frames,
-    const std::vector<image_pyramid_descriptor_t> &pyramids,
-    const std::vector<std::vector<Feature>> &features, size_t c);
+  void trackFeatures(PyramidInfo *prev_pyr,
+                     PyramidInfo *cur_pyr,
+                     const std::vector<std::vector<Feature>> &prev_features,
+                     std::vector<std::vector<Feature>> *cur_features);
+  void computePyramidInfo(PyramidInfo *pyr,
+                          const std::shared_ptr<FrameBundle> & frames);
 
 private:
   struct GPUBuffer {
@@ -86,6 +89,14 @@ private:
   };
 
   void freeStorage(const::std::size_t & camera_id);
+  void clearTracksAndFeatures(std::vector<std::shared_ptr<Frame>> *base_frames,
+                              size_t c);
+  void addFeaturesToTracks(
+    const std::vector<std::shared_ptr<Frame>> &base_frames,
+    const std::vector<image_pyramid_descriptor_t> &pyramids,
+    const std::vector<std::vector<Feature>> &features,
+    size_t c);
+
   void detectNewFeatures(std::vector<std::vector<Feature>> *features,
                          const std::vector<std::shared_ptr<Frame>> &base_frames,
                          size_t max_new_features,
