@@ -37,6 +37,7 @@
 #include <vector>
 #include "vilib/feature_tracker/feature_tracker_base.h"
 #include "vilib/feature_detection/detector_base_gpu.h"
+#include "vilib/common/feature.h"
 
 namespace vilib {
 
@@ -52,6 +53,10 @@ public:
   void setDetectorGPU(std::shared_ptr<DetectorBaseGPU> & detector,
                       const std::size_t & camera_id) override;
   void reset(void) override;
+  void addFeaturesToTracks(
+    const std::vector<std::shared_ptr<Frame>> &base_frames,
+    const std::vector<std::vector<Feature>> &features, size_t c);
+
 private:
   struct GPUBuffer {
     // Indirection layer
@@ -80,7 +85,7 @@ private:
   };
 
   void freeStorage(const::std::size_t & camera_id);
-  int addTrack(std::shared_ptr<Frame> & first_frame,
+  int addTrack(const std::shared_ptr<Frame> & first_frame,
                const float & first_x,
                const float & first_y,
                const int & first_level,
