@@ -82,32 +82,42 @@ FeatureTrackerGPU::~FeatureTrackerGPU(void) {
   }
 }
 
-#if 0
 void FeatureTrackerGPU::trackFeatures(
-  PyramidInfo *prev_pyr,
-  PyramidInfo *cur_pyr,
-  const std::vector<std::vector<Feature>> &prev_features,
-  std::vector<std::vector<Feature>> *cur_features,
-  size_t cam_id) {
-  assert(prev_pyr.base_frames.size() >= cam_id &&
-         cur_pyr.base_frames.size() >= cam_id &&
-         prev_pyr.pyramid_descs.size() >= cam_id &&
-         cur_pyr.pyramid_descs.size() >= cam_id &&
-         detector_.size() >= cam_id &&
-         "cam_id out of range");
-  // clear all tracks before detection
-  std::vector<std::shared_ptr<Frame>> cur_base_frames;
+  std::vector<PyramidInfo> *prev_pyr,
+  std::vector<PyramidInfo> *cur_pyr,
+  const std::vector<std::vector<Feature>> &prev_features) {
+  assert(prev_pyr->size() == detector_.size() && "prev_pyr wrong size!");
+  assert(cur_pyr->size() == detector_.size() && "cur_pyr wrong size!");
+  assert(prev_features.size() == detector_.size() && "prev_features wrong size!");
 
-  // remove all features from frame and release track
-  // memory
-  clearTracksAndFeatures(&cur_base_frames[c], &buffer_[c],
-                         &tracks_[c], &tracked_features_num_[c]);
-  addFeaturesToTracks(cur_pyr->base_frames[c], cur_pyr->pyramid_descs,
-                      prev_features, &detected_features_num_[c]);
-  (void) cur_features;
-
+  for(std::size_t c=0;c<cur_pyr->size();++c) {
+    auto &pp = (*prev_pyr)[c];
+    auto &cp = (*cur_pyr)[c];
+    // remove all features from frame and release track
+    // memory. Note that we clear the old frame since
+    // the new one should already be clean
+    clearTracksAndFeatures(pp.frame, &buffer_[c],
+                           &tracks_[c], &tracked_features_num_[c]);
+    // add previous features to tracks, (computes hessians etc)
+    // so we pass in the old frame and pyramid such that the
+    // old patches are being used.
+    // This call will also set the number of detected features to zero
+    addFeaturesToTracks(pp.frame, pp.pyramid, prev_features[c],
+                        tracked_features_num_[c],
+                        &buffer_[c], &detected_features_num_[c],
+                        &tracks_[c], &stream_[c]);
+    // now take one KLT step with the new image
+    trackOnGPU(cp.pyramid, pyramid_patch_sizes_, tracks_[c],
+               &buffer_[c], &stream_[c]);
+    // record the results into the tracks structure
+    // and update the frame with the features
+    processTrackingResults(cp.frame, &tracks_[c],
+                           &tracked_features_num_[c],
+                           &buffer_[c], &stream_[c]);
+    // the new features should now be attached to the
+    // frame
+  }
 }
-#endif
 
 
 void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
@@ -125,20 +135,20 @@ void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
     assert(detector_[c] != nullptr && "One must set a GPU feature detector first");
   }
   // 00) Prerequisites
-  PyramidInfo pyInfo;
+  std::vector<PyramidInfo> pyInfo;
   computePyramidInfo(&pyInfo, cur_frames);
-  std::vector<image_pyramid_descriptor_t> &cur_pyramids = pyInfo.pyramid_descs;
-  std::vector<std::shared_ptr<Frame>> &cur_base_frames = pyInfo.base_frames;
 
   // 01) Track existing feature tracks (only if there are any)
   for(std::size_t c=0;c<cur_frames->size();++c) {
-    trackOnGPU(cur_pyramids[c], pyramid_patch_sizes_, tracks_[c],
+    auto &pyr = pyInfo[c].pyramid;
+    trackOnGPU(pyr, pyramid_patch_sizes_, tracks_[c],
                &buffer_[c], &stream_[c]);
   }
 
   // 02) Process Tracking results
   for(std::size_t c=0;c<cur_frames->size();++c) {
-    processTrackingResults(cur_base_frames[c], &tracks_[c],
+    auto &frame = pyInfo[c].frame;
+    processTrackingResults(frame, &tracks_[c],
                            &tracked_features_num_[c],
                            &buffer_[c], &stream_[c]);
   }
@@ -146,19 +156,21 @@ void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
   // 03) Detect new features (if necessary)
   std::vector<std::vector<Feature>> features_found(cur_frames->size());
   for(std::size_t c=0;c<cur_frames->size();++c) {
+    auto &frame = pyInfo[c].frame;
+    auto &pyr = pyInfo[c].pyramid;
     if(tracked_features_num_[c] < options_.min_tracks_to_detect_new_features) {
       if(options_.reset_before_detection) {
         // clear all tracks before detection
-        clearTracksAndFeatures(cur_base_frames[c], &buffer_[c],
+        clearTracksAndFeatures(frame, &buffer_[c],
                                &tracks_[c], &tracked_features_num_[c]);
       }
       const size_t max_new_features = (size_t)std::max(
         0, options_.use_best_n_features - (int)tracked_features_num_[c]);
-      detectNewFeatures(&features_found[c], *cur_base_frames[c],
+      detectNewFeatures(&features_found[c], *frame,
                         max_new_features, detector_[c]);
     }
     // add new features to tracks
-    addFeaturesToTracks(cur_base_frames[c], cur_pyramids[c], features_found[c],
+    addFeaturesToTracks(frame, pyr, features_found[c],
                         tracked_features_num_[c],
                         &buffer_[c], &detected_features_num_[c], &tracks_[c],
                         &stream_[c]);
@@ -177,12 +189,13 @@ void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
 }
 
 void FeatureTrackerGPU::computePyramidInfo(
-  PyramidInfo *pyr,
+  std::vector<PyramidInfo> *pyr,
   const std::shared_ptr<FrameBundle> & frames) {
+  pyr->clear();
   for(std::size_t c=0;c<frames->size();++c) {
-    pyr->base_frames.push_back(frames->at(c));
-    pyr->pyramid_descs.push_back(pyr->base_frames.back()->getPyramidDescriptor());
-    pyr->base_frames.back()->resizeFeatureStorage(max_ftr_count_);
+    auto f = frames->at(c);
+    pyr->push_back(PyramidInfo(f, f->getPyramidDescriptor()));
+    pyr->back().frame->resizeFeatureStorage(max_ftr_count_);
   }
 }
 

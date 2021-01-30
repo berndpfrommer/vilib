@@ -54,13 +54,10 @@ public:
   void setDetectorGPU(std::shared_ptr<DetectorBaseGPU> & detector,
                       const std::size_t & camera_id) override;
   void reset(void) override;
-#if 0  
-  void trackFeatures(PyramidInfo *prev_pyr,
-                     PyramidInfo *cur_pyr,
-                     const std::vector<std::vector<Feature>> &prev_features,
-                     std::vector<std::vector<Feature>> *cur_features);
-#endif  
-  void computePyramidInfo(PyramidInfo *pyr,
+  void trackFeatures(std::vector<PyramidInfo> *prev_pyr,
+                     std::vector<PyramidInfo> *cur_pyr,
+                     const std::vector<std::vector<Feature>> &prev_features);
+  void computePyramidInfo(std::vector<PyramidInfo> *pyr,
                           const std::shared_ptr<FrameBundle> & frames);
 
 private:
