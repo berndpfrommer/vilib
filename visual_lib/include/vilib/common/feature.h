@@ -37,8 +37,9 @@
 namespace vilib {
 
 struct Feature {
-Feature(double xa, double ya, int l, double s) :
-  x(xa), y(ya), level(l), score(s)  {};
+Feature(int tr_id = 0, double xa = 0, double ya = 0, int l = 0, double s = 0) :
+  track_id(tr_id), x(xa), y(ya), level(l), score(s)  {};
+  int track_id;
   double x;
   double y;
   int level;

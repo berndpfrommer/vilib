@@ -48,6 +48,20 @@ namespace vilib {
  */
 #define METADATA_ELEMENT_BYTES                64
 
+/*
+ * static function to extract features from frame
+ */
+void FeatureTrackerGPU::features_from_frame(const Frame &frame,
+                                            std::vector<Feature> *features) {
+  features->resize(frame.num_features_);
+  for (std::size_t i = 0; i < frame.num_features_; ++i) {
+    const Eigen::Vector2d& pos_2d = frame.px_vec_.col(i);
+    const int& track_id = frame.track_id_vec_[i];
+    (*features)[i] = Feature(track_id, pos_2d(0), pos_2d(1), frame.level_vec_[i],
+                             frame.score_vec_[i]);
+  }
+}
+
 FeatureTrackerGPU::FeatureTrackerGPU(const FeatureTrackerOptions & options,
                                      const std::size_t & camera_num) :
   FeatureTrackerBase(options,camera_num),
@@ -82,13 +96,15 @@ FeatureTrackerGPU::~FeatureTrackerGPU(void) {
   }
 }
 
-void FeatureTrackerGPU::trackFeatures(
+void FeatureTrackerGPU::track(
   std::vector<PyramidInfo> *prev_pyr,
   std::vector<PyramidInfo> *cur_pyr,
-  const std::vector<std::vector<Feature>> &prev_features) {
+  const std::vector<std::vector<Feature>> &prev_features,
+  std::vector<std::vector<Feature>> *cur_features) {
   assert(prev_pyr->size() == detector_.size() && "prev_pyr wrong size!");
   assert(cur_pyr->size() == detector_.size() && "cur_pyr wrong size!");
   assert(prev_features.size() == detector_.size() && "prev_features wrong size!");
+  assert(cur_features->size() == detector_.size() && "cur_features wrong size!");
 
   for(std::size_t c=0;c<cur_pyr->size();++c) {
     auto &pp = (*prev_pyr)[c];
@@ -114,15 +130,47 @@ void FeatureTrackerGPU::trackFeatures(
     processTrackingResults(cp.frame, &tracks_[c],
                            &tracked_features_num_[c],
                            &buffer_[c], &stream_[c]);
-    // the new features should now be attached to the
-    // frame
+    // extract features from the frame
+    features_from_frame(*cp.frame, &((*cur_features)[c]));
   }
 }
 
+void FeatureTrackerGPU::track(std::vector<PyramidInfo> *cur_pyr,
+                              std::vector<std::vector<Feature>> *features) {
+  assert(cur_pyr->size() == detector_.size() &&
+         "The pyramid vector size and the detector count differs");
+  size_t num_tracked, num_detected;
+  track(cur_pyr, num_tracked, num_detected);
+  features->resize(cur_pyr->size());
+  for (size_t i = 0; i < cur_pyr->size(); i++) {
+    const PyramidInfo &pi = (*cur_pyr)[i];
+    std::vector<Feature> &fv = (*features)[i];
+    features_from_frame(*pi.frame, &fv);
+  }
+}
 
 void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
                               std::size_t & total_tracked_features_num,
                               std::size_t & total_detected_features_num) {
+  assert(cur_frames->size() == detector_.size() &&
+         "The frame count and the detector count differs");
+  // check for detector being set up
+  for(std::size_t c=0;c<cur_frames->size();++c) {
+    assert(detector_[c] != nullptr && "One must set a GPU feature detector first");
+  }
+  // 00) Prerequisites
+  std::vector<PyramidInfo> pyInfo = computePyramidInfo(cur_frames);
+  track(&pyInfo, total_tracked_features_num, total_detected_features_num);
+}
+
+void FeatureTrackerGPU::track(std::vector<PyramidInfo> *cur_pyr,
+                              std::size_t & total_tracked_features_num,
+                              std::size_t & total_detected_features_num) {
+#if VERBOSE_TRACKING
+  static std::size_t frame_bundle_id = 1;
+  std::cout << "Frame bundle " << (frame_bundle_id++) << " -------------" << std::endl;
+#endif /* VERBOSE_TRACKING */
+
   assert(cur_frames->size() == detector_.size() &&
          "The frame count and the detector count differs");
 #if VERBOSE_TRACKING
@@ -130,23 +178,17 @@ void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
   std::cout << "Frame bundle " << (frame_bundle_id++) << " -------------" << std::endl;
 #endif /* VERBOSE_TRACKING */
 
-  // check for detector being set up
-  for(std::size_t c=0;c<cur_frames->size();++c) {
-    assert(detector_[c] != nullptr && "One must set a GPU feature detector first");
-  }
-  // 00) Prerequisites
-  std::vector<PyramidInfo> pyInfo;
-  computePyramidInfo(&pyInfo, cur_frames);
-
+  auto & pyInfo = *cur_pyr; // alias for readability
+  size_t numCam = cur_pyr->size();
   // 01) Track existing feature tracks (only if there are any)
-  for(std::size_t c=0;c<cur_frames->size();++c) {
+  for(std::size_t c=0;c<numCam;++c) {
     auto &pyr = pyInfo[c].pyramid;
     trackOnGPU(pyr, pyramid_patch_sizes_, tracks_[c],
                &buffer_[c], &stream_[c]);
   }
 
   // 02) Process Tracking results
-  for(std::size_t c=0;c<cur_frames->size();++c) {
+  for(std::size_t c=0;c<numCam;++c) {
     auto &frame = pyInfo[c].frame;
     processTrackingResults(frame, &tracks_[c],
                            &tracked_features_num_[c],
@@ -154,8 +196,8 @@ void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
   }
 
   // 03) Detect new features (if necessary)
-  std::vector<std::vector<Feature>> features_found(cur_frames->size());
-  for(std::size_t c=0;c<cur_frames->size();++c) {
+  std::vector<std::vector<Feature>> features_found(numCam);
+  for(std::size_t c=0;c<numCam;++c) {
     auto &frame = pyInfo[c].frame;
     auto &pyr = pyInfo[c].pyramid;
     if(tracked_features_num_[c] < options_.min_tracks_to_detect_new_features) {
@@ -188,15 +230,16 @@ void FeatureTrackerGPU::track(const std::shared_ptr<FrameBundle> & cur_frames,
                                                 0);
 }
 
-void FeatureTrackerGPU::computePyramidInfo(
-  std::vector<PyramidInfo> *pyr,
+std::vector<PyramidInfo>
+FeatureTrackerGPU::computePyramidInfo(
   const std::shared_ptr<FrameBundle> & frames) {
-  pyr->clear();
+  std::vector<PyramidInfo> pyr;
   for(std::size_t c=0;c<frames->size();++c) {
     auto f = frames->at(c);
-    pyr->push_back(PyramidInfo(f, f->getPyramidDescriptor()));
-    pyr->back().frame->resizeFeatureStorage(max_ftr_count_);
+    pyr.push_back(PyramidInfo(f, f->getPyramidDescriptor()));
+    pyr.back().frame->resizeFeatureStorage(max_ftr_count_);
   }
+  return (pyr);
 }
 
 
@@ -362,7 +405,8 @@ void FeatureTrackerGPU::detectNewFeatures(
             // Yes, we are using every feature
             for(std::size_t cell_index=0;cell_index<detector_grid.size();++cell_index) {
               if(detector_grid.isEmpty(cell_index) && h_score[cell_index] > 0.0f) {
-                features->push_back(Feature(h_pos[cell_index * 2],
+                features->push_back(Feature(0,
+                                            h_pos[cell_index * 2],
                                             h_pos[cell_index * 2 + 1],
                                             h_level[cell_index],
                                             h_score[cell_index]));
@@ -380,7 +424,8 @@ void FeatureTrackerGPU::detectNewFeatures(
                 ++i) {
               std::size_t cell_index = idx[i];
               if(detector_grid.isEmpty(cell_index) && h_score[cell_index] > 0.0f) {
-                features->push_back(Feature(h_pos[cell_index * 2],
+                features->push_back(Feature(0,
+                                            h_pos[cell_index * 2],
                                             h_pos[cell_index * 2 + 1],
                                             h_level[cell_index],
                                             h_score[cell_index]));

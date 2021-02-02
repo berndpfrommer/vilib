@@ -48,19 +48,28 @@ public:
                     const std::size_t & camera_num);
   ~FeatureTrackerGPU(void);
 
-  void track(const std::shared_ptr<FrameBundle> & cur_frames,
-             std::size_t & total_tracked_features_num,
-             std::size_t & total_detected_features_num) override;
   void setDetectorGPU(std::shared_ptr<DetectorBaseGPU> & detector,
                       const std::size_t & camera_id) override;
   void reset(void) override;
-  void trackFeatures(std::vector<PyramidInfo> *prev_pyr,
-                     std::vector<PyramidInfo> *cur_pyr,
-                     const std::vector<std::vector<Feature>> &prev_features);
-  void computePyramidInfo(std::vector<PyramidInfo> *pyr,
-                          const std::shared_ptr<FrameBundle> & frames);
+  void track(const std::shared_ptr<FrameBundle> & cur_frames,
+             std::size_t & total_tracked_features_num,
+             std::size_t & total_detected_features_num) override;
+  void track(std::vector<PyramidInfo> *cur_pyr,
+             std::vector<std::vector<Feature>> *features);
+  void track(std::vector<PyramidInfo> *prev_pyr,
+             std::vector<PyramidInfo> *cur_pyr,
+             const std::vector<std::vector<Feature>> &prev_features,
+             std::vector<std::vector<Feature>> *cur_features);
+  std::vector<PyramidInfo> computePyramidInfo(
+    const std::shared_ptr<FrameBundle> & frames);
 
+  static void features_from_frame(const Frame &frame,
+                                  std::vector<Feature> *features);
 private:
+  void track(std::vector<PyramidInfo> *cur_pyr,
+             std::size_t & total_tracked_features_num,
+             std::size_t & total_detected_features_num);
+
   struct GPUBuffer {
     // Indirection layer
     int * h_indir_data_;
